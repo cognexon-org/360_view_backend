@@ -1,0 +1,385 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  OWNER
+  MANAGER
+  CAPTURE_AGENT
+  DESIGNER
+  REVIEWER
+  ADMIN
+}
+
+enum CaptureMode {
+  PROPERTY_TOUR
+  DESIGN_SCAN
+}
+
+enum CapturePlatform {
+  ANDROID
+  IOS
+  WEB
+}
+
+enum CaptureStatus {
+  DRAFT
+  CAPTURING
+  UPLOADING
+  PROCESSING
+  READY
+  RECAPTURE_REQUIRED
+  PUBLISHED
+  ARCHIVED
+}
+
+enum AssetKind {
+  PANORAMA
+  PHOTO
+  VIDEO
+  THUMBNAIL
+  AR_POSES
+  CAMERA_INTRINSICS
+  DEPTH_MAP
+  DEPTH_CONFIDENCE
+  ROOMPLAN_USDZ
+  FLOORPLAN
+  GLB
+  DESIGN_PREVIEW
+  OTHER
+}
+
+enum AssetStatus {
+  PENDING
+  UPLOADED
+  PROCESSING
+  APPROVED
+  REJECTED
+}
+
+enum JobType {
+  PANORAMA_STITCH
+  PANORAMA_QA
+  PRIVACY_SCAN
+  CAPTURE_VALIDATION
+  ROOM_SHELL
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum TourStatus {
+  DRAFT
+  READY
+  PUBLISHED
+  ARCHIVED
+}
+
+enum VerificationLabel {
+  ACTUAL_UNIT
+  SAMPLE_FLAT
+  CGI_RENDER
+  PHOTO_STORY
+  VIDEO_TOUR
+  PANORAMA_TOUR
+  RECONSTRUCTED_3D
+  DESIGN_CONCEPT
+}
+
+enum DesignStatus {
+  DRAFT
+  GENERATING
+  READY
+  PUBLISHED
+  ARCHIVED
+}
+
+model Organization {
+  id         String     @id @default(cuid())
+  name       String
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  users      User[]
+  properties Property[]
+}
+
+model User {
+  id            String         @id @default(cuid())
+  phone         String         @unique
+  name          String?
+  role          UserRole       @default(OWNER)
+  organizationId String
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  captures      CaptureSession[]
+  designVersions DesignVersion[]
+
+  @@index([organizationId])
+}
+
+model OtpCode {
+  id        String    @id @default(cuid())
+  phone     String
+  codeHash  String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([phone, expiresAt])
+}
+
+model Property {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  address        String
+  propertyType   String
+  latitude       Float?
+  longitude      Float?
+  metadata       Json?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  units          Unit[]
+
+  @@index([organizationId])
+}
+
+model Unit {
+  id          String    @id @default(cuid())
+  propertyId  String
+  property    Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  label       String
+  bedrooms    Int?
+  bathrooms   Int?
+  areaSqFt    Float?
+  price       Float?
+  availability String?
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  captures    CaptureSession[]
+  tours       Tour[]
+  designProjects DesignProject[]
+
+  @@index([propertyId])
+}
+
+model CaptureSession {
+  id             String          @id @default(cuid())
+  unitId         String
+  unit           Unit            @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  createdById    String
+  createdBy      User            @relation(fields: [createdById], references: [id])
+  mode           CaptureMode
+  platform       CapturePlatform
+  status         CaptureStatus   @default(DRAFT)
+  deviceMetadata Json?
+  checklist      Json?
+  qualityReport  Json?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  rooms          Room[]
+  assets         Asset[]
+  connections    CaptureConnection[]
+  jobs           ProcessingJob[]
+  tours          Tour[]
+  designProjects DesignProject[]
+
+  @@index([unitId])
+  @@index([createdById])
+}
+
+model Room {
+  id               String         @id @default(cuid())
+  captureId        String
+  capture          CaptureSession @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  name             String
+  sortOrder        Int            @default(0)
+  panoramaAssetId  String?
+  ceilingHeightM   Float?
+  floorPolygon     Json?
+  measurements     Json?
+  roomModel        Json?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  assets           Asset[]
+  outgoingConnections CaptureConnection[] @relation("ConnectionFrom")
+  incomingConnections CaptureConnection[] @relation("ConnectionTo")
+  outgoingHotspots Hotspot[] @relation("HotspotFrom")
+  incomingHotspots Hotspot[] @relation("HotspotTo")
+
+  @@index([captureId])
+}
+
+model CaptureConnection {
+  id         String         @id @default(cuid())
+  captureId  String
+  capture    CaptureSession @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  fromRoomId String
+  fromRoom   Room           @relation("ConnectionFrom", fields: [fromRoomId], references: [id], onDelete: Cascade)
+  toRoomId   String
+  toRoom     Room           @relation("ConnectionTo", fields: [toRoomId], references: [id], onDelete: Cascade)
+  label      String?
+  createdAt  DateTime       @default(now())
+
+  @@unique([captureId, fromRoomId, toRoomId])
+  @@index([captureId])
+}
+
+model Asset {
+  id         String         @id @default(cuid())
+  captureId  String
+  capture    CaptureSession @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  roomId     String?
+  room       Room?          @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  kind       AssetKind
+  objectKey  String         @unique
+  mimeType   String
+  sizeBytes  BigInt
+  checksumSha256 String?
+  status     AssetStatus    @default(PENDING)
+  metadata   Json?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  jobs       ProcessingJob[]
+
+  @@index([captureId])
+  @@index([roomId])
+}
+
+model ProcessingJob {
+  id          String         @id @default(cuid())
+  type        JobType
+  status      JobStatus      @default(QUEUED)
+  progress    Int            @default(0)
+  captureId   String?
+  capture     CaptureSession? @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  assetId     String?
+  asset       Asset?         @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  designProjectId String?
+  designProject DesignProject? @relation(fields: [designProjectId], references: [id], onDelete: SetNull)
+  input       Json?
+  output      Json?
+  error       String?
+  createdAt   DateTime       @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  @@index([captureId])
+  @@index([status])
+}
+
+model Tour {
+  id                String            @id @default(cuid())
+  unitId            String
+  unit              Unit              @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  captureId         String
+  capture           CaptureSession    @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  title             String
+  slug              String            @unique
+  status            TourStatus        @default(DRAFT)
+  verificationLabel VerificationLabel @default(PANORAMA_TOUR)
+  captureDate       DateTime
+  manifest          Json?
+  publishedAt       DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  hotspots          Hotspot[]
+  leads             Lead[]
+
+  @@index([unitId])
+  @@index([captureId])
+}
+
+model Hotspot {
+  id         String   @id @default(cuid())
+  tourId     String
+  tour       Tour     @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  fromRoomId String
+  fromRoom   Room     @relation("HotspotFrom", fields: [fromRoomId], references: [id], onDelete: Cascade)
+  toRoomId   String
+  toRoom     Room     @relation("HotspotTo", fields: [toRoomId], references: [id], onDelete: Cascade)
+  yaw        Float
+  pitch      Float
+  label      String
+  createdAt  DateTime @default(now())
+
+  @@index([tourId])
+}
+
+model Lead {
+  id        String   @id @default(cuid())
+  tourId    String
+  tour      Tour     @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  name      String?
+  phone     String?
+  email     String?
+  action    String
+  consent   Boolean
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([tourId])
+}
+
+model DesignProject {
+  id              String       @id @default(cuid())
+  unitId          String
+  unit            Unit         @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  captureId       String
+  capture         CaptureSession @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  name            String
+  status          DesignStatus @default(DRAFT)
+  slug            String       @unique
+  activeVersion   Int          @default(1)
+  model           Json
+  generatedGlbKey String?
+  publicManifest  Json?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  versions        DesignVersion[]
+  jobs            ProcessingJob[]
+
+  @@index([unitId])
+  @@index([captureId])
+}
+
+model DesignVersion {
+  id            String        @id @default(cuid())
+  projectId     String
+  project       DesignProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  version       Int
+  model         Json
+  notes         String?
+  createdById   String
+  createdBy     User          @relation(fields: [createdById], references: [id])
+  createdAt     DateTime      @default(now())
+
+  @@unique([projectId, version])
+}
+
+model AuditEvent {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorId        String?
+  entityType     String
+  entityId       String
+  action         String
+  payload        Json?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+}

@@ -1,0 +1,69 @@
+{
+  "units": "meters",
+  "rooms": [
+    {
+      "id": "living-room",
+      "name": "Living Room",
+      "heightM": 2.8,
+      "floorPolygon": [[0, 0], [4.5, 0], [4.5, 3.6], [0, 3.6]],
+      "walls": [
+        {
+          "id": "wall-1",
+          "start": [0, 0],
+          "end": [4.5, 0],
+          "thicknessM": 0.12,
+          "structuralStatus": "UNKNOWN",
+          "openings": [
+            {
+              "id": "door-1",
+              "type": "DOOR",
+              "offsetM": 0.5,
+              "widthM": 0.9,
+              "heightM": 2.1,
+              "bottomM": 0
+            }
+          ]
+        },
+        {
+          "id": "wall-2",
+          "start": [4.5, 0],
+          "end": [4.5, 3.6],
+          "thicknessM": 0.12,
+          "structuralStatus": "UNKNOWN",
+          "openings": [
+            {
+              "id": "window-1",
+              "type": "WINDOW",
+              "offsetM": 1.0,
+              "widthM": 1.4,
+              "heightM": 1.2,
+              "bottomM": 0.9
+            }
+          ]
+        },
+        {
+          "id": "wall-3",
+          "start": [4.5, 3.6],
+          "end": [0, 3.6],
+          "thicknessM": 0.12,
+          "structuralStatus": "UNKNOWN",
+          "openings": []
+        },
+        {
+          "id": "wall-4",
+          "start": [0, 3.6],
+          "end": [0, 0],
+          "thicknessM": 0.12,
+          "structuralStatus": "UNKNOWN",
+          "openings": []
+        }
+      ],
+      "objects": []
+    }
+  ],
+  "metadata": {
+    "scaleConfirmed": true,
+    "scaleSource": "laser_measurement",
+    "structuralVerificationRequired": true
+  }
+}

@@ -1,0 +1,13 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+pydantic==2.11.3
+pydantic-settings==2.9.1
+numpy==2.2.5
+Pillow==11.2.1
+opencv-python-headless==4.11.0.86
+minio==7.2.15
+trimesh==4.6.8
+shapely==2.1.0
+mapbox-earcut==1.0.3
+pytest==8.3.5
+httpx==0.28.1
