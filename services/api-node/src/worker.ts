@@ -19,12 +19,40 @@ async function buildPayload(jobId: string) {
   switch (job.type) {
     case 'PANORAMA_STITCH': {
       if (!job.capture) throw new Error('PANORAMA_STITCH requires a capture');
-      const input = (job.input ?? {}) as { roomId?: string; assetIds?: string[] };
+      const input = (job.input ?? {}) as {
+        roomId?: string;
+        assetIds?: string[];
+        capturePattern?: string;
+        frames?: Array<{
+          assetId: string;
+          fileName: string;
+          targetYawDegrees: number;
+          targetPitchDegrees: number;
+          measuredYawDegrees: number;
+          measuredPitchDegrees: number;
+          measuredRollDegrees: number;
+          capturedAtEpochMs: number;
+        }>;
+        horizontalFovDegrees?: number;
+        verticalFovDegrees?: number;
+        minPitchDegrees?: number;
+        maxPitchDegrees?: number;
+      };
       if (!input.roomId || !Array.isArray(input.assetIds) || input.assetIds.length < 3) {
         throw new Error('PANORAMA_STITCH has invalid input');
       }
-      const inputAssets = job.capture.assets.filter((asset) => input.assetIds!.includes(asset.id));
-      if (inputAssets.length !== input.assetIds.length) throw new Error('Some stitch assets are missing');
+      const assetsById = new Map(job.capture.assets.map((asset) => [asset.id, asset]));
+      const frameByAssetId = new Map((input.frames ?? []).map((frame) => [frame.assetId, frame]));
+      const inputAssets = input.assetIds.map((assetId) => {
+        const asset = assetsById.get(assetId);
+        if (!asset) throw new Error(`Stitch asset ${assetId} is missing`);
+        const frame = frameByAssetId.get(assetId);
+        return {
+          bucket: config.MINIO_BUCKET_PRIVATE,
+          objectKey: asset.objectKey,
+          ...(frame ?? {})
+        };
+      });
       const outputKey = `org/${job.capture.unitId}/capture/${job.capture.id}/stitched/${input.roomId}-${job.id}.jpg`;
       return {
         job,
@@ -32,7 +60,12 @@ async function buildPayload(jobId: string) {
           jobId: job.id,
           type: job.type,
           payload: {
-            inputs: inputAssets.map((asset) => ({ bucket: config.MINIO_BUCKET_PRIVATE, objectKey: asset.objectKey })),
+            inputs: inputAssets,
+            capturePattern: input.capturePattern ?? 'LEGACY_GUIDED',
+            horizontalFovDegrees: input.horizontalFovDegrees,
+            verticalFovDegrees: input.verticalFovDegrees,
+            minPitchDegrees: input.minPitchDegrees,
+            maxPitchDegrees: input.maxPitchDegrees,
             outputBucket: config.MINIO_BUCKET_PRIVATE,
             outputKey
           }

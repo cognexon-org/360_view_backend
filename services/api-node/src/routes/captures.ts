@@ -263,19 +263,86 @@ export async function captureRoutes(app: FastifyInstance) {
       if (!capture) return notFound(reply, 'Capture');
       const room = await prisma.room.findFirst({ where: { id: roomId, captureId } });
       if (!room) return notFound(reply, 'Room');
-      const body = z.object({ assetIds: z.array(z.string()).min(3).max(80) }).parse(request.body);
+      const body = z.object({
+        assetIds: z.array(z.string()).min(3).max(80),
+        capturePattern: z.enum([
+          'QUICK_CENTRAL_RING',
+          'FULL_TWO_RINGS_WITH_CAPS',
+          'LEGACY_GUIDED'
+        ]).default('LEGACY_GUIDED'),
+        frames: z.array(z.object({
+          assetId: z.string(),
+          fileName: z.string().min(1).max(255),
+          targetYawDegrees: z.number().min(-720).max(720),
+          targetPitchDegrees: z.number().min(-90).max(90),
+          measuredYawDegrees: z.number().min(-720).max(720),
+          measuredPitchDegrees: z.number().min(-90).max(90),
+          measuredRollDegrees: z.number().min(-180).max(180),
+          capturedAtEpochMs: z.number().int().positive()
+        })).optional(),
+        horizontalFovDegrees: z.number().min(30).max(110).optional(),
+        verticalFovDegrees: z.number().min(40).max(130).optional(),
+        minPitchDegrees: z.number().min(-90).max(90).optional(),
+        maxPitchDegrees: z.number().min(-90).max(90).optional(),
+        manifestAssetId: z.string().optional()
+      }).parse(request.body);
+
+      const expectedRange = body.capturePattern === 'QUICK_CENTRAL_RING'
+        ? { min: 8, max: 12 }
+        : body.capturePattern === 'FULL_TWO_RINGS_WITH_CAPS'
+          ? { min: 18, max: 24 }
+          : { min: 3, max: 80 };
+      if (body.assetIds.length < expectedRange.min || body.assetIds.length > expectedRange.max) {
+        return reply.code(400).send({
+          error: 'INVALID_FRAME_COUNT_FOR_CAPTURE_PATTERN',
+          capturePattern: body.capturePattern,
+          expected: expectedRange,
+          received: body.assetIds.length
+        });
+      }
+      if (body.frames) {
+        const frameAssetIds = body.frames.map((frame) => frame.assetId);
+        const uniqueFrameIds = new Set(frameAssetIds);
+        if (
+          body.frames.length !== body.assetIds.length ||
+          uniqueFrameIds.size !== body.assetIds.length ||
+          body.assetIds.some((assetId) => !uniqueFrameIds.has(assetId))
+        ) {
+          return reply.code(400).send({ error: 'FRAME_METADATA_DOES_NOT_MATCH_ASSETS' });
+        }
+      }
+      if (
+        body.minPitchDegrees !== undefined &&
+        body.maxPitchDegrees !== undefined &&
+        body.minPitchDegrees >= body.maxPitchDegrees
+      ) {
+        return reply.code(400).send({ error: 'INVALID_PITCH_LIMITS' });
+      }
+
       const assets = await prisma.asset.findMany({
         where: { id: { in: body.assetIds }, captureId, roomId, kind: 'PHOTO', status: { in: ['UPLOADED', 'APPROVED'] } }
       });
       if (assets.length !== body.assetIds.length) {
         return reply.code(400).send({ error: 'INVALID_STITCH_INPUT_ASSETS' });
       }
+      if (body.manifestAssetId) {
+        const manifest = await prisma.asset.findFirst({
+          where: {
+            id: body.manifestAssetId,
+            captureId,
+            roomId,
+            kind: 'OTHER',
+            status: { in: ['UPLOADED', 'APPROVED'] }
+          }
+        });
+        if (!manifest) return reply.code(400).send({ error: 'INVALID_CAPTURE_MANIFEST_ASSET' });
+      }
       const job = await prisma.processingJob.create({
         data: {
           type: 'PANORAMA_STITCH',
           captureId,
           status: 'QUEUED',
-          input: asJson({ roomId, assetIds: body.assetIds })
+          input: asJson({ roomId, ...body })
         }
       });
       await visionQueue.add('PANORAMA_STITCH', { jobId: job.id }, { attempts: 2, backoff: { type: 'exponential', delay: 5000 } });

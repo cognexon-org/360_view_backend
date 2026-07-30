@@ -13,7 +13,7 @@ from .schemas import JobType, ProcessRequest, ProcessResponse
 logging.basicConfig(level=settings.log_level.upper())
 logger = logging.getLogger("propertytour360-vision")
 
-app = FastAPI(title="PropertyTour360 Vision Service", version="1.0.0")
+app = FastAPI(title="PropertyTour360 Vision Service", version="1.1.0")
 
 
 @app.get("/health")

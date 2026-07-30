@@ -53,11 +53,14 @@ For an already-created 2:1 equirectangular panorama:
 3. Call `/assets/{assetId}/complete`.
 4. Poll `/v1/jobs/{jobId}` or the capture endpoint until QA finishes.
 
-For guided overlapping photos:
+For guided room photos:
 
-1. Upload three or more `PHOTO` assets against the same room.
-2. Call `/rooms/{roomId}/stitch-panorama` with their asset IDs.
-3. Poll the returned job. The baseline OpenCV stitcher creates and validates a panorama.
+1. Choose `QUICK_CENTRAL_RING` (8–10 photos) or `FULL_TWO_RINGS_WITH_CAPS` (18–24 photos).
+2. Upload each `PHOTO` asset against the same room and optionally upload `capture_manifest.json` as an `OTHER` asset.
+3. Call `/rooms/{roomId}/stitch-panorama` with `assetIds`, `capturePattern`, camera field-of-view values, pitch limits and one metadata record per frame containing measured yaw, pitch and roll.
+4. Poll the returned job. The pose-aware stitcher creates and validates the panorama.
+
+Quick outputs remain 2:1 equirectangular files but publish `minPitchDegrees` and `maxPitchDegrees` so the viewer does not expose uncaptured ceiling/floor regions. Full-sphere outputs publish ±90° limits.
 
 Connect rooms through `/v1/captures/{captureId}/connections`, then call `/submit`. After the capture becomes `READY`, create a tour, add yaw/pitch hotspots and publish it.
 
