@@ -1,0 +1,6 @@
+5ee0a9d476c62ed36b9856ea6ba0f0cff9651037d8dff68df894257d50dd956c  services/vision-python/app/processors/stitch.py
+bfabd91df9939544e20a1de6b59a566fecad4542a2e18f74667b0d80589db1a6  services/vision-python/app/processors/alignment.py
+0cf2dd4e8caf2a53d0a5708a2f44d944c021b3925bdd25bcedcb0eacfbdbe13e  services/vision-python/app/processors/compositor.py
+7b01c5bd7915c649e7bca0213b50f517097e683a3ca98778765bdbd71ef60977  services/vision-python/app/processors/panorama.py
+7e1a6453a9d754e5329103a59b727bf0b4060d4c97d55e57ceab4799ba4746dd  services/api-node/src/routes/tours.ts
+32e58de8a50e2135c47a6a02f1dbd8d98c873ba620569459e40a914d6087c5d7  services/api-node/src/lib/manifest.ts

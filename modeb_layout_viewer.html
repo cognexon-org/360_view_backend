@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PropertyTour360 — Mode B Room Layout Viewer</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #2f81f7; --door: #f0883e; --window: #58a6ff;
+    --warn: #d29922; --ok: #3fb950;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; height: 100vh; overflow: hidden; }
+  #app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+  #side { background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; padding: 18px; }
+  #stage { position: relative; }
+  canvas { display: block; }
+  h1 { font-size: 15px; letter-spacing: .3px; margin-bottom: 4px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 20px 0 8px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+  .drop { border: 1px dashed var(--line); border-radius: 8px; padding: 16px; text-align: center; color: var(--muted); cursor: pointer; font-size: 12px; transition: .15s; }
+  .drop:hover { border-color: var(--accent); color: var(--text); }
+  .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.05); font-size: 12px; }
+  .row span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+  .chip.ok { background: rgba(63,185,80,.15); color: var(--ok); }
+  .chip.warn { background: rgba(210,153,34,.15); color: var(--warn); }
+  .room { padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; margin-bottom: 7px; cursor: pointer; font-size: 12px; }
+  .room:hover, .room.active { border-color: var(--accent); background: rgba(47,129,247,.08); }
+  .room b { display: block; margin-bottom: 3px; font-size: 13px; }
+  label.toggle { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12px; cursor: pointer; }
+  #hud { position: absolute; left: 14px; bottom: 14px; background: rgba(13,17,23,.85); border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; font-size: 11px; color: var(--muted); }
+  #legend { position: absolute; right: 14px; top: 14px; background: rgba(13,17,23,.85); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; font-size: 11px; }
+  #legend div { display: flex; align-items: center; gap: 7px; padding: 2px 0; }
+  .sw { width: 11px; height: 11px; border-radius: 2px; }
+  button { background: var(--accent); border: 0; color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; width: 100%; margin-top: 8px; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>Mode B Room Layout</h1>
+    <div class="sub">Canonical model viewer</div>
+    <div class="drop" id="drop">Drop <b>canonical model JSON</b> here<br />or click to browse</div>
+    <input type="file" id="file" accept=".json" style="display:none" />
+    <button class="ghost" id="demo">Load demo (L-shaped flat)</button>
+
+    <h2>Display</h2>
+    <label class="toggle"><input type="checkbox" id="tWalls" checked /> Walls</label>
+    <label class="toggle"><input type="checkbox" id="tOpenings" checked /> Doors &amp; windows</label>
+    <label class="toggle"><input type="checkbox" id="tFloor" checked /> Floors</label>
+    <label class="toggle"><input type="checkbox" id="tCeiling" /> Ceilings</label>
+    <label class="toggle"><input type="checkbox" id="tLabels" checked /> Room labels</label>
+    <label class="toggle"><input type="checkbox" id="tDims" checked /> Dimensions</label>
+
+    <h2>Rooms</h2>
+    <div id="rooms"></div>
+
+    <h2>Model</h2>
+    <div id="stats"></div>
+  </div>
+  <div id="stage">
+    <div id="legend">
+      <div><span class="sw" style="background:#8b949e"></span> Wall</div>
+      <div><span class="sw" style="background:#f0883e"></span> Door</div>
+      <div><span class="sw" style="background:#58a6ff"></span> Window</div>
+      <div><span class="sw" style="background:#d29922"></span> Needs review</div>
+    </div>
+    <div id="hud">Drag orbit · Scroll zoom · Right-drag pan</div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const stage = document.getElementById('stage');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1117);
+scene.fog = new THREE.Fog(0x0d1117, 30, 90);
+
+const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+stage.appendChild(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0xbcd4ff, 0x2a2f38, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(9, 16, 7); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -25; sun.shadow.camera.right = 25;
+sun.shadow.camera.top = 25; sun.shadow.camera.bottom = -25;
+scene.add(sun);
+
+const grid = new THREE.GridHelper(80, 80, 0x30363d, 0x1c2128);
+grid.position.y = -0.01;
+scene.add(grid);
+
+const world = new THREE.Group();
+scene.add(world);
+
+/* ---------- Orbit controls (hand-rolled; no external dependency) ---------- */
+const target = new THREE.Vector3(0, 1.2, 0);
+let spherical = { radius: 18, phi: Math.PI / 3.2, theta: Math.PI / 4 };
+function applyCamera() {
+  const s = spherical;
+  camera.position.set(
+    target.x + s.radius * Math.sin(s.phi) * Math.sin(s.theta),
+    target.y + s.radius * Math.cos(s.phi),
+    target.z + s.radius * Math.sin(s.phi) * Math.cos(s.theta)
+  );
+  camera.lookAt(target);
+}
+let drag = null;
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+renderer.domElement.addEventListener('pointerdown', e => {
+  drag = { x: e.clientX, y: e.clientY, button: e.button };
+  renderer.domElement.setPointerCapture(e.pointerId);
+});
+renderer.domElement.addEventListener('pointerup', e => {
+  drag = null;
+  renderer.domElement.releasePointerCapture(e.pointerId);
+});
+renderer.domElement.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.button === 2) {
+    const panScale = spherical.radius * 0.0016;
+    const right = new THREE.Vector3().subVectors(camera.position, target).cross(camera.up).normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    target.addScaledVector(right, -dx * panScale);
+    target.addScaledVector(up, dy * panScale);
+  } else {
+    spherical.theta -= dx * 0.006;
+    spherical.phi = Math.max(0.08, Math.min(Math.PI / 2.02, spherical.phi - dy * 0.006));
+  }
+  applyCamera();
+});
+renderer.domElement.addEventListener('wheel', e => {
+  e.preventDefault();
+  spherical.radius = Math.max(1.5, Math.min(90, spherical.radius * (1 + Math.sign(e.deltaY) * 0.11)));
+  applyCamera();
+}, { passive: false });
+
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+
+/* ---------------------------- Model building ---------------------------- */
+const MAT = {
+  wall:    new THREE.MeshStandardMaterial({ color: 0xc9d1d9, roughness: 0.92, side: THREE.DoubleSide }),
+  wallLow: new THREE.MeshStandardMaterial({ color: 0xd29922, roughness: 0.9, side: THREE.DoubleSide, transparent: true, opacity: 0.75 }),
+  floor:   new THREE.MeshStandardMaterial({ color: 0x6e7681, roughness: 0.96 }),
+  ceiling: new THREE.MeshStandardMaterial({ color: 0xeaeef3, roughness: 0.98, transparent: true, opacity: 0.35, side: THREE.DoubleSide }),
+  door:    new THREE.MeshStandardMaterial({ color: 0xf0883e, roughness: 0.6, transparent: true, opacity: 0.85 }),
+  window:  new THREE.MeshStandardMaterial({ color: 0x58a6ff, roughness: 0.2, metalness: 0.1, transparent: true, opacity: 0.55 })
+};
+
+const groups = { walls: new THREE.Group(), openings: new THREE.Group(), floors: new THREE.Group(), ceilings: new THREE.Group(), labels: new THREE.Group(), dims: new THREE.Group() };
+Object.values(groups).forEach(g => world.add(g));
+
+function makeLabel(text, color = '#e6edf3', scale = 1) {
+  const c = document.createElement('canvas');
+  const ctx = c.getContext('2d');
+  ctx.font = 'bold 52px ui-sans-serif, system-ui, sans-serif';
+  c.width = Math.ceil(ctx.measureText(text).width) + 40; c.height = 76;
+  const g = c.getContext('2d');
+  g.font = 'bold 52px ui-sans-serif, system-ui, sans-serif';
+  g.fillStyle = 'rgba(13,17,23,.82)';
+  g.roundRect(0, 0, c.width, c.height, 12); g.fill();
+  g.fillStyle = color; g.textBaseline = 'middle';
+  g.fillText(text, 20, c.height / 2 + 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  sprite.scale.set(c.width / 190 * scale, c.height / 190 * scale, 1);
+  return sprite;
+}
+
+/**
+ * A wall with openings is built as up to five boxes: the segment left of the
+ * opening, the segment right of it, the lintel above and the sill below.
+ * Boolean CSG would be cleaner but needs a library; this reads the same
+ * visually and stays dependency-free.
+ */
+function buildWall(a, b, height, thickness, openings, needsReview) {
+  const group = new THREE.Group();
+  const dx = b[0] - a[0], dz = b[1] - a[1];
+  const length = Math.hypot(dx, dz);
+  if (length < 0.01) return group;
+  const angle = Math.atan2(dz, dx);
+  const material = needsReview ? MAT.wallLow : MAT.wall;
+
+  const sorted = [...openings].sort((p, q) => p.offsetM - q.offsetM);
+  let cursor = 0;
+  const addPanel = (from, to, yFrom, yTo) => {
+    const w = to - from, h = yTo - yFrom;
+    if (w <= 0.005 || h <= 0.005) return;
+    const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, thickness), material);
+    box.castShadow = box.receiveShadow = true;
+    box.position.set(from + w / 2 - length / 2, yFrom + h / 2, 0);
+    group.add(box);
+  };
+
+  for (const op of sorted) {
+    const start = Math.max(0, op.offsetM);
+    const end = Math.min(length, op.offsetM + op.widthM);
+    if (end <= start) continue;
+    addPanel(cursor, start, 0, height);
+    const sill = op.type === 'WINDOW' ? (op.sillM ?? 0.9) : 0;
+    const top = Math.min(height, sill + op.heightM);
+    if (sill > 0.01) addPanel(start, end, 0, sill);
+    if (top < height - 0.01) addPanel(start, end, top, height);
+
+    const pane = new THREE.Mesh(
+      new THREE.BoxGeometry(end - start, top - sill, thickness * 0.35),
+      op.type === 'WINDOW' ? MAT.window : MAT.door
+    );
+    pane.position.set(start + (end - start) / 2 - length / 2, sill + (top - sill) / 2, 0);
+    const holder = new THREE.Group();
+    holder.add(pane);
+    holder.position.set(a[0] + dx / 2, 0, a[1] + dz / 2);
+    holder.rotation.y = -angle;
+    groups.openings.add(holder);
+
+    cursor = end;
+  }
+  addPanel(cursor, length, 0, height);
+
+  group.position.set(a[0] + dx / 2, 0, a[1] + dz / 2);
+  group.rotation.y = -angle;
+  return group;
+}
+
+function shapeFromPolygon(polygon) {
+  const shape = new THREE.Shape();
+  polygon.forEach(([x, z], i) => (i ? shape.lineTo(x, z) : shape.moveTo(x, z)));
+  shape.closePath();
+  return shape;
+}
+
+let model = null;
+function build(m) {
+  model = m;
+  Object.values(groups).forEach(g => { while (g.children.length) g.remove(g.children[0]); });
+
+  const rooms = m.rooms || [];
+  const box = new THREE.Box3();
+
+  for (const room of rooms) {
+    const polygon = (room.floorPolygon || []).map(p => [Number(p[0]), Number(p[1])]);
+    if (polygon.length < 3) continue;
+    const height = Number(room.heightM ?? room.ceilingHeightM ?? 2.7);
+    const review = room.verificationStatus === 'DESIGNER_REVIEW_REQUIRED';
+
+    const geo = new THREE.ExtrudeGeometry(shapeFromPolygon(polygon), { depth: 0.04, bevelEnabled: false });
+    geo.rotateX(Math.PI / 2);
+    const floor = new THREE.Mesh(geo, MAT.floor);
+    floor.receiveShadow = true;
+    groups.floors.add(floor);
+
+    const ceilGeo = geo.clone();
+    const ceiling = new THREE.Mesh(ceilGeo, MAT.ceiling);
+    ceiling.position.y = height;
+    groups.ceilings.add(ceiling);
+
+    const walls = room.walls && room.walls.length
+      ? room.walls
+      : polygon.map((p, i) => ({ start: p, end: polygon[(i + 1) % polygon.length], heightM: height, thicknessM: 0.12, openings: [] }));
+
+    walls.forEach((wall, index) => {
+      const start = [Number(wall.start[0]), Number(wall.start[1])];
+      const end = [Number(wall.end[0]), Number(wall.end[1])];
+      const openings = (room.openings || []).filter(o => Number(o.wallIndex) === index)
+        .concat(wall.openings || []);
+      groups.walls.add(buildWall(start, end, Number(wall.heightM ?? height), Number(wall.thicknessM ?? 0.12), openings, review));
+
+      if (index === 0 || true) {
+        const len = Math.hypot(end[0] - start[0], end[1] - start[1]);
+        if (len > 0.6) {
+          const label = makeLabel(`${len.toFixed(2)} m`, '#8b949e', 0.72);
+          label.position.set((start[0] + end[0]) / 2, 0.12, (start[1] + end[1]) / 2);
+          groups.dims.add(label);
+        }
+      }
+    });
+
+    const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
+    const cz = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
+    const area = Math.abs(polygon.reduce((s, p, i) => {
+      const q = polygon[(i + 1) % polygon.length];
+      return s + (p[0] * q[1] - q[0] * p[1]);
+    }, 0) / 2);
+    const label = makeLabel(`${room.name || room.id}  ·  ${area.toFixed(1)} m²`, review ? '#d29922' : '#e6edf3');
+    label.position.set(cx, height + 0.45, cz);
+    groups.labels.add(label);
+
+    polygon.forEach(([x, z]) => box.expandByPoint(new THREE.Vector3(x, 0, z)));
+    box.expandByPoint(new THREE.Vector3(cx, height, cz));
+  }
+
+  if (!box.isEmpty()) {
+    const centre = box.getCenter(new THREE.Vector3());
+    target.copy(centre); target.y = 1.0;
+    spherical.radius = Math.max(6, box.getSize(new THREE.Vector3()).length() * 1.15);
+    applyCamera();
+  }
+  renderSidebar();
+  applyToggles();
+}
+
+function renderSidebar() {
+  const rooms = model?.rooms || [];
+  document.getElementById('rooms').innerHTML = rooms.map((r, i) => {
+    const poly = r.floorPolygon || [];
+    const area = Math.abs(poly.reduce((s, p, j) => {
+      const q = poly[(j + 1) % poly.length];
+      return s + (p[0] * q[1] - q[0] * p[1]);
+    }, 0) / 2);
+    const review = r.verificationStatus === 'DESIGNER_REVIEW_REQUIRED';
+    const openings = (r.openings || []).length;
+    return `<div class="room" data-i="${i}"><b>${r.name || r.id}</b>
+      ${area.toFixed(1)} m² · ${poly.length} walls · ${openings} openings
+      <div style="margin-top:5px"><span class="chip ${review ? 'warn' : 'ok'}">${review ? 'Needs review' : 'Confirmed'}</span></div></div>`;
+  }).join('') || '<div class="sub">No rooms loaded.</div>';
+
+  document.querySelectorAll('.room').forEach(el => el.onclick = () => {
+    const room = model.rooms[+el.dataset.i];
+    const poly = room.floorPolygon || [];
+    if (!poly.length) return;
+    target.set(poly.reduce((s, p) => s + p[0], 0) / poly.length, 1.0, poly.reduce((s, p) => s + p[1], 0) / poly.length);
+    spherical.radius = 9; applyCamera();
+    document.querySelectorAll('.room').forEach(r => r.classList.remove('active'));
+    el.classList.add('active');
+  });
+
+  const rs = model?.rooms || [];
+  const totalArea = rs.reduce((s, r) => {
+    const p = r.floorPolygon || [];
+    return s + Math.abs(p.reduce((a, q, i) => { const n = p[(i + 1) % p.length]; return a + (q[0] * n[1] - n[0] * q[1]); }, 0) / 2);
+  }, 0);
+  const openings = rs.reduce((s, r) => s + (r.openings || []).length, 0);
+  document.getElementById('stats').innerHTML = `
+    <div class="row"><span>Schema</span><span>${model?.schemaVersion || '—'}</span></div>
+    <div class="row"><span>Rooms</span><span>${rs.length}</span></div>
+    <div class="row"><span>Total area</span><span>${totalArea.toFixed(1)} m²</span></div>
+    <div class="row"><span>Openings</span><span>${openings}</span></div>`;
+}
+
+function applyToggles() {
+  groups.walls.visible = tWalls.checked;
+  groups.openings.visible = tOpenings.checked;
+  groups.floors.visible = tFloor.checked;
+  groups.ceilings.visible = tCeiling.checked;
+  groups.labels.visible = tLabels.checked;
+  groups.dims.visible = tDims.checked;
+}
+['tWalls','tOpenings','tFloor','tCeiling','tLabels','tDims'].forEach(id =>
+  document.getElementById(id).addEventListener('change', applyToggles));
+
+/* ------------------------------- Loading ------------------------------- */
+const drop = document.getElementById('drop'), fileInput = document.getElementById('file');
+drop.onclick = () => fileInput.click();
+fileInput.onchange = e => e.target.files[0] && readFile(e.target.files[0]);
+['dragover','dragenter'].forEach(t => document.body.addEventListener(t, e => { e.preventDefault(); drop.style.borderColor = '#2f81f7'; }));
+['dragleave','drop'].forEach(t => document.body.addEventListener(t, e => { e.preventDefault(); drop.style.borderColor = ''; }));
+document.body.addEventListener('drop', e => e.dataTransfer.files[0] && readFile(e.dataTransfer.files[0]));
+function readFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => { try { build(JSON.parse(reader.result)); } catch (err) { alert('Could not parse model JSON: ' + err.message); } };
+  reader.readAsText(file);
+}
+
+const DEMO = {
+  schemaVersion: '2.1',
+  rooms: [
+    { id: 'living', name: 'Living Room', heightM: 2.8, verificationStatus: 'DESIGNER_REVIEW_REQUIRED',
+      floorPolygon: [[0,0],[6,0],[6,3],[3.5,3],[3.5,5.5],[0,5.5]],
+      openings: [
+        { type: 'DOOR',   wallIndex: 5, offsetM: 1.6, widthM: 0.9,  heightM: 2.05, sillM: 0 },
+        { type: 'WINDOW', wallIndex: 0, offsetM: 1.2, widthM: 1.8,  heightM: 1.3,  sillM: 0.9 },
+        { type: 'WINDOW', wallIndex: 0, offsetM: 3.8, widthM: 1.4,  heightM: 1.3,  sillM: 0.9 },
+        { type: 'WINDOW', wallIndex: 2, offsetM: 0.8, widthM: 1.2,  heightM: 1.3,  sillM: 0.9 }
+      ] },
+    { id: 'bed', name: 'Bedroom', heightM: 2.8, verificationStatus: 'DESIGNER_CONFIRMED',
+      floorPolygon: [[6.3,0],[10.3,0],[10.3,3.6],[6.3,3.6]],
+      openings: [
+        { type: 'DOOR',   wallIndex: 3, offsetM: 1.2, widthM: 0.85, heightM: 2.05, sillM: 0 },
+        { type: 'WINDOW', wallIndex: 1, offsetM: 1.0, widthM: 1.6,  heightM: 1.4,  sillM: 0.85 }
+      ] },
+    { id: 'bath', name: 'Bathroom', heightM: 2.6, verificationStatus: 'DESIGNER_CONFIRMED',
+      floorPolygon: [[6.3,3.9],[9.0,3.9],[9.0,6.2],[6.3,6.2]],
+      openings: [
+        { type: 'DOOR',   wallIndex: 0, offsetM: 0.9, widthM: 0.75, heightM: 2.0,  sillM: 0 },
+        { type: 'WINDOW', wallIndex: 2, offsetM: 1.0, widthM: 0.7,  heightM: 0.6,  sillM: 1.6 }
+      ] }
+  ]
+};
+document.getElementById('demo').onclick = () => build(DEMO);
+
+resize(); applyCamera(); build(DEMO);
+(function loop() { requestAnimationFrame(loop); renderer.render(scene, camera); })();
+</script>
+</body>
+</html>

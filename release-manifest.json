@@ -1,0 +1,20 @@
+{
+  "name": "PropertyTour360 Unified Backend",
+  "version": "3.1.0",
+  "releaseType": "source-release",
+  "modes": [
+    "PROPERTY_TOUR",
+    "DESIGN_SCAN"
+  ],
+  "capturePackageSchema": "2.1",
+  "canonicalModelSchema": "2.1",
+  "modeABaseline": "360_view_backend-main (1).zip",
+  "androidTarget": "PropertyTour360 Android Mode B v3.1.0",
+  "validation": {
+    "pythonTests": "23 passed",
+    "typescriptParseDiagnostics": 0,
+    "modeACriticalHashMatches": "6/6",
+    "fullNodeDockerBuild": "required in deployment environment"
+  },
+  "generatedAtUtc": "2026-07-30T18:44:42.117581+00:00"
+}

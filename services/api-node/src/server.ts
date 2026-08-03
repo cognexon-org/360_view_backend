@@ -13,6 +13,7 @@ import { propertyRoutes } from './routes/properties.js';
 import { captureRoutes } from './routes/captures.js';
 import { tourRoutes } from './routes/tours.js';
 import { designRoutes } from './routes/design.js';
+import { modeBRoutes } from './routes/modeb.js';
 import { jobRoutes } from './routes/jobs.js';
 import { publicRoutes } from './routes/public.js';
 
@@ -24,10 +25,28 @@ app.setReplySerializer((payload) =>
 
 await app.register(cors, { origin: true, credentials: true });
 await app.register(jwt, { secret: config.JWT_SECRET });
-await app.register(rateLimit, { max: 300, timeWindow: '1 minute' });
+// Rate limiting is keyed per authenticated user, not per IP. Several field
+// operators on one office Wi-Fi or behind carrier NAT share a source address,
+// so an IP-keyed bucket punished the whole team for one person's upload.
+//
+// Upload-path routes (presign + complete + job polling) get a much larger
+// budget: a single Mode B room legitimately issues hundreds of calls in a
+// burst, and throttling those is what produced the 429 seen in the field.
+const UPLOAD_PATH = /^\/v1\/captures\/[^/]+\/(uploads|assets)|^\/v1\/jobs\/|^\/v2\/geometry-jobs\//;
+
+await app.register(rateLimit, {
+  max: (request) => (UPLOAD_PATH.test(request.url) ? config.RATE_LIMIT_UPLOAD_MAX : config.RATE_LIMIT_MAX),
+  timeWindow: config.RATE_LIMIT_WINDOW,
+  keyGenerator: (request) => {
+    const user = (request as { user?: { userId?: string } }).user;
+    return user?.userId ?? request.ip;
+  },
+  // Never rate-limit health checks; the container orchestrator depends on them.
+  allowList: (request) => request.url === '/health' || request.url === '/'
+});
 await app.register(swagger, {
   openapi: {
-    info: { title: 'PropertyTour360 API', version: '1.0.0' },
+    info: { title: 'PropertyTour360 API', version: '3.1.0' },
     servers: [{ url: 'http://localhost:3000' }]
   }
 });
@@ -43,7 +62,7 @@ app.decorate('authenticate', async function authenticate(request, reply): Promis
 
 app.get('/', async () => ({
   service: 'PropertyTour360 API',
-  version: '1.0.0',
+  version: '3.1.0',
   docs: '/docs',
   health: '/health'
 }));
@@ -58,6 +77,7 @@ await propertyRoutes(app);
 await captureRoutes(app);
 await tourRoutes(app);
 await designRoutes(app);
+await modeBRoutes(app);
 await jobRoutes(app);
 await publicRoutes(app);
 

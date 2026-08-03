@@ -1,123 +1,131 @@
-# PropertyTour360 Backend v1.1
+# PropertyTour360 Unified Backend v3.1.0
 
-A runnable backend monorepo for the two mobile capture modes:
+Unified backend source release for:
 
-- **Mode A — Property Tour:** connected room panoramas, room graph, hotspots, public manifest and lead capture.
-- **Mode B — Design Scan:** ARCore/RoomPlan evidence storage, manual measurement confirmation, versioned parametric room models, GLB generation and public design concepts.
+- **Mode A — Property Tour:** the supplied, working panorama capture, stitch, QA, room graph and tour-publication pipeline.
+- **Mode B — Design Scan:** Android Capture Package v2.1 ingestion, RGB-D evidence processing, canonical parametric drafts, designer review, versioned editing, exports, renders, catalogue data, collaboration and confirmation-gated publication.
 
-## Included services
+This release was rebased on the user's latest working `360_view_backend-main (1).zip`. Mode A's critical panorama implementation is intentionally retained rather than rewritten.
 
-| Service | Technology | Port | Responsibility |
+## Services
+
+| Service | Stack | Port | Purpose |
 |---|---|---:|---|
-| API | Node.js 22, TypeScript, Fastify, Prisma | 3000 | Auth, organisations, inventory, captures, uploads, tours, design projects and public APIs |
-| Worker | Node.js, BullMQ | — | Asynchronous processing orchestration and database state updates |
-| Vision | Python 3.12, FastAPI, OpenCV, trimesh | 8001 | Panorama stitching/QA, capture validation, privacy heuristic and GLB room-shell generation |
-| Database | PostgreSQL 16 | 5432 | Product, workflow and audit data |
-| Queue | Redis 7 | 6379 | BullMQ jobs and retries |
-| Object storage | MinIO | 9000/9001 | Private source evidence and public approved assets |
+| API | Node.js 22, TypeScript, Fastify, Prisma | 3000 | Auth, properties, captures, Mode A tours, Mode B projects and public APIs |
+| Worker | Node.js, BullMQ | — | Long-running panorama, geometry, render and export orchestration |
+| Vision | Python, FastAPI, OpenCV, NumPy, Shapely, trimesh | 8001 | Mode A stitching/QA and Mode B evidence/geometry/export processing |
+| PostgreSQL | PostgreSQL 16 | 5432 | Organisation-scoped product and workflow data |
+| Redis | Redis 7 | 6379 | BullMQ jobs, retries and progress |
+| Object storage | MinIO | 9000/9001 | Private originals/drafts and approved public derivatives |
 
-## Start on a MacBook, Windows or Linux computer
+## Start locally
 
 Requirements:
 
-- Docker Desktop with Docker Compose
-- About 6 GB free RAM for this MVP stack
+- Docker Desktop or Docker Engine with Compose
+- Approximately 6–8 GB free RAM
 - Ports 3000, 5432, 6379, 8001, 9000 and 9001 available
-
-Run:
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-docker compose up --build
-```
-
 Open:
 
 ```text
-Node API:      http://localhost:3000
+API:           http://localhost:3000
 API docs:      http://localhost:3000/docs
-Python docs:   http://localhost:8001/docs
+Vision docs:   http://localhost:8001/docs
 MinIO console: http://localhost:9001
 ```
 
-MinIO uses the credentials from `.env.example` unless you change them.
+For a physical Android device, replace the presign/public `localhost` values in `.env` with the computer's LAN IP address.
 
-For uploads from a physical Android/iPhone on the same Wi-Fi, change these values in `.env` from `localhost` to the Mac/PC LAN address, for example `192.168.1.20`:
+## Mode A preservation
 
-```text
-MINIO_PRESIGN_ENDPOINT=192.168.1.20
-MINIO_PUBLIC_BASE_URL=http://192.168.1.20:9000/propertytour-public
-```
+The following critical Mode A files are SHA-256 identical to the supplied working backend:
 
-The API itself continues to use the internal Docker hostname `minio`. In production, use an HTTPS storage/CDN domain.
+- `services/vision-python/app/processors/stitch.py`
+- `services/vision-python/app/processors/alignment.py`
+- `services/vision-python/app/processors/compositor.py`
+- `services/vision-python/app/processors/panorama.py`
+- `services/api-node/src/routes/tours.ts`
+- `services/api-node/src/lib/manifest.ts`
 
-Stop the stack:
+The panorama request payload and successful-processing completion path in `worker.ts` were preserved while adding new Mode B job types around them.
 
-```bash
-docker compose down
-```
+## Mode B implemented
 
-Delete all local database and object-storage data:
+### Capture and evidence
 
-```bash
-docker compose down -v
-```
+- Android Capture Package v2.1 registration
+- Typed RGB keyframe, dense/raw depth, confidence, pose, intrinsics, plane, manifest and evidence assets
+- Archive and manifest checksum verification
+- Stale-depth filtering and package quality reporting
+- RoomPlan source import endpoint
+- Private-by-default evidence storage
 
-## Implemented product capabilities
+### Geometry and canonical model
 
-### Mode A
+- Depth16/confidence decoding
+- Camera-intrinsic scaling and RGB-D unprojection
+- Camera-to-world pose transformation
+- Bounded point-cloud evidence generation
+- Floor/ceiling and room-boundary proposals
+- Trusted field polygon preservation
+- Measurement-constrained draft adjustment
+- Unplaced door/window/passage proposals
+- Evidence references, confidence, uncertainty and processor provenance
+- Geometry QA and proposal accept/reject APIs
+- Canonical schema 2.1 with floors, rooms, walls, openings, objects and measurements
 
-- OTP/JWT development authentication
-- Organisation-scoped properties and units
-- Android/iOS/Web capture sessions
-- Room creation and room-to-room connection graph
-- Presigned direct-to-MinIO uploads
-- Upload completion verification
-- Equirectangular panorama QA
-- Pose-aware server-side stitching for Quick Room View and Full Room Sphere
-- Automatic assignment of approved panoramas to rooms
-- Capture graph and completeness validation
-- Tour creation and yaw/pitch hotspots
-- Publication of immutable public panorama assets and manifest
-- Anonymous lead/WhatsApp/call/book-visit events
-
-### Mode B
-
-- Design-scan capture sessions
-- Storage for AR poses, intrinsics, raw depth, confidence and RoomPlan USDZ
-- Per-room floor polygon, ceiling height and measurement JSON
-- Canonical wall/opening/object model validation
-- Immutable design versions
-- GLB room-shell generation with walls, floors, ceilings, doors and windows
-- Public design-concept manifest
-- Structural-safety disclaimer and unknown/structural wall status
-
-## Important engineering boundaries
-
-This is a **runnable product-backend MVP**, not a production certification.
-
-- The OTP is returned in development; connect an Indian SMS/OTP provider before deployment.
-- Guided stitching uses uploaded yaw/pitch/roll metadata, field-of-view estimates, exposure normalization and a high-dominance overlap blend to reduce double edges. It still cannot eliminate parallax caused by camera translation, moving subjects, mirrors or very close objects.
-- Quick Room View is published with explicit vertical pitch limits; Full Room Sphere is validated for spherical coverage.
-- Privacy scanning currently performs heuristic face detection only. Production requires stronger face/text/document/plate detection and review tools.
-- ARCore depth and RoomPlan files are stored as source evidence. Mobile apps should also send a normalized room model; this package deliberately does not pretend that arbitrary depth or USDZ automatically becomes a verified CAD model.
-- The generated GLB is a draft design shell. Dimensions must be checked, and structural wall modifications require a qualified professional.
-- Add production SMS, KYC, billing, malware scanning, object lifecycle policies, observability, backups, CI/CD and secret management before handling real customers.
-
-## Repository layout
+### Design lifecycle
 
 ```text
-services/api-node/       Node API and BullMQ worker
-services/vision-python/  Python image and geometry service
-docs/                    Architecture and API workflows
-examples/                Example parametric design model
+CAPTURE_READY
+→ MODEL_GENERATING
+→ DRAFT_MODEL_READY
+→ DESIGNER_CORRECTION
+→ DESIGNER_CONFIRMED / SITE_VERIFIED
+→ CLIENT_PRESENTATION_READY
+→ PUBLISHED
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/API_WORKFLOWS.md](docs/API_WORKFLOWS.md).
+- Projects are created from actual capture rooms rather than sample data
+- Immutable model versions with optimistic version conflict checks
+- Designer-confirmed/site-verified state gates
+- Private working GLBs and exports
+- Approved-version copy to the public bucket only during publication
+- Unpublish and share-link revocation paths
+
+### Studio/backend capabilities
+
+- Design options
+- Comments and resolution
+- Client approvals/change requests
+- Expiring or revocable client share links
+- Catalogue assets, products, variants and materials
+- Preview/final render jobs
+- Canonical JSON, GLB, SVG, DXF, PDF, CSV/XLSX schedule/BOQ and measurement-report job types
+- Server-Sent Events endpoint for geometry-job progress
+
+## Android v3.1 integration
+
+The corrected Android v3.1 app uses the existing `/v1` capture and design-project routes for its primary handoff. The backend also exposes advanced `/v2` Mode B routes for the Designer Studio and future iOS/RoomPlan clients.
+
+See:
+
+- `ANDROID_V3_1_BACKEND_CONTRACT.md`
+- `MODE_A_PRESERVATION.md`
+- `MODE_B_BACKEND_IMPLEMENTATION_MATRIX.md`
+- `docs/API_V2.md`
+- `docs/MODE_B_PIPELINE.md`
+
+## Accuracy boundary
+
+The canonical model remains authoritative. Sensor-derived point clouds, planes, opening candidates and room polygons are proposals until reviewed. This system is for interior visualization and space planning, not legal survey, structural certification or fabrication without qualified site verification.
+
+## Validation
+
+See `RELEASE_VALIDATION.md`. The included Python test suite passed 23 tests, TypeScript source parsed without syntax errors, Docker Compose YAML parsed, Mode A critical hashes matched and ZIP integrity was verified. A complete Node/Prisma/Docker integration build still must be executed in the deployment environment because package installation and Docker were unavailable during packaging.

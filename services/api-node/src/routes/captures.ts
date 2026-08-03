@@ -126,11 +126,27 @@ export async function captureRoutes(app: FastifyInstance) {
           sortOrder: z.number().int().min(0).optional(),
           ceilingHeightM: z.number().positive().max(20).nullable().optional(),
           floorPolygon: z.array(z.tuple([z.number(), z.number()])).min(3).nullable().optional(),
-          measurements: z.record(z.unknown()).nullable().optional(),
+          measurements: z.union([z.record(z.unknown()), z.array(z.record(z.unknown()))]).nullable().optional(),
+          openings: z.array(z.record(z.unknown())).nullable().optional(),
+          roomPlacement: z.record(z.unknown()).nullable().optional(),
           roomModel: z.record(z.unknown()).nullable().optional(),
           panoramaAssetId: z.string().nullable().optional()
         })
         .parse(request.body);
+      const existingModel = existing.roomModel && typeof existing.roomModel === 'object' && !Array.isArray(existing.roomModel)
+        ? existing.roomModel as Record<string, unknown>
+        : {};
+      const mergedRoomModel = body.roomModel === null
+        ? undefined
+        : body.roomModel
+          ? body.roomModel
+          : (body.openings !== undefined || body.roomPlacement !== undefined)
+            ? {
+                ...existingModel,
+                ...(body.openings === null ? {} : body.openings !== undefined ? { mobileOpenings: body.openings } : {}),
+                ...(body.roomPlacement === null ? {} : body.roomPlacement !== undefined ? { roomPlacement: body.roomPlacement } : {})
+              }
+            : undefined;
       const room = await prisma.room.update({
         where: { id: roomId },
         data: {
@@ -139,7 +155,7 @@ export async function captureRoutes(app: FastifyInstance) {
           ceilingHeightM: body.ceilingHeightM,
           floorPolygon: body.floorPolygon === null ? undefined : body.floorPolygon ? asJson(body.floorPolygon) : undefined,
           measurements: body.measurements === null ? undefined : body.measurements ? asJson(body.measurements) : undefined,
-          roomModel: body.roomModel === null ? undefined : body.roomModel ? asJson(body.roomModel) : undefined,
+          roomModel: mergedRoomModel ? asJson(mergedRoomModel) : undefined,
           panoramaAssetId: body.panoramaAssetId
         }
       });
@@ -183,7 +199,7 @@ export async function captureRoutes(app: FastifyInstance) {
           roomId: z.string().optional(),
           kind: z.enum([
             'PANORAMA', 'PHOTO', 'VIDEO', 'THUMBNAIL', 'AR_POSES', 'CAMERA_INTRINSICS', 'DEPTH_MAP',
-            'DEPTH_CONFIDENCE', 'ROOMPLAN_USDZ', 'FLOORPLAN', 'GLB', 'DESIGN_PREVIEW', 'OTHER'
+            'DEPTH_CONFIDENCE', 'ROOMPLAN_USDZ', 'FLOORPLAN', 'GLB', 'DESIGN_PREVIEW', 'RGB_KEYFRAME', 'AR_PLANES', 'CAPTURE_MANIFEST', 'MODEL_EVIDENCE', 'FLOORPLAN_SVG', 'DESIGN_RENDER', 'DESIGN_EXPORT', 'OTHER'
           ]),
           filename: z.string().min(1).max(255),
           mimeType: z.string().min(3).max(150),
@@ -203,7 +219,8 @@ export async function captureRoutes(app: FastifyInstance) {
           objectKey,
           mimeType: body.mimeType,
           sizeBytes: BigInt(body.sizeBytes),
-          status: 'PENDING'
+          status: 'PENDING',
+          metadata: asJson({ originalFilename: body.filename })
         }
       });
       const uploadUrl = await minioSigner.presignedPutObject(config.MINIO_BUCKET_PRIVATE, objectKey, 60 * 60);
@@ -231,6 +248,31 @@ export async function captureRoutes(app: FastifyInstance) {
         data: { status: 'UPLOADED', checksumSha256: body.checksumSha256 }
       });
 
+      const originalFilename = String(((asset.metadata ?? {}) as Record<string, unknown>).originalFilename ?? '');
+      const isCaptureManifest = asset.kind === 'CAPTURE_MANIFEST' && originalFilename === 'manifest.json';
+      const isCaptureArchive = asset.kind === 'MODEL_EVIDENCE' && (
+        asset.mimeType === 'application/zip' || originalFilename.toLowerCase().endsWith('.zip')
+      );
+      if (asset.roomId && (isCaptureManifest || isCaptureArchive)) {
+        const packageId = `${captureId}:${asset.roomId}`;
+        await prisma.capturePackage.upsert({
+          where: { id: packageId },
+          create: {
+            id: packageId,
+            captureId,
+            roomId: asset.roomId,
+            schemaVersion: '2.1',
+            captureType: 'ANDROID_RGBD_ROOM_SCAN',
+            status: 'UPLOADED',
+            manifestAssetId: isCaptureManifest ? asset.id : undefined,
+            archiveAssetId: isCaptureArchive ? asset.id : undefined
+          },
+          update: isCaptureManifest
+            ? { manifestAssetId: asset.id, schemaVersion: '2.1', status: 'UPLOADED', checksumVerified: false }
+            : { archiveAssetId: asset.id, schemaVersion: '2.1', status: 'UPLOADED', checksumVerified: false }
+        });
+      }
+
       if (asset.kind === 'PANORAMA') {
         const job = await prisma.processingJob.create({
           data: { type: 'PANORAMA_QA', assetId: asset.id, captureId, status: 'QUEUED' }
@@ -241,6 +283,58 @@ export async function captureRoutes(app: FastifyInstance) {
     } catch (error) {
       return badRequest(reply, error);
     }
+  });
+
+  /**
+   * Signed GET for any capture asset the caller's organisation owns.
+   *
+   * Designer Studio needs this to display Mode A panoramas: without it the
+   * stitched equirectangular JPEGs sit in private object storage with no way for
+   * an authenticated browser to read them. Scoped by organisation and short
+   * lived, the same way export downloads work.
+   */
+  app.get('/v1/captures/:captureId/assets/:assetId/download-url', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { captureId, assetId } = request.params as { captureId: string; assetId: string };
+    const capture = await getCaptureForOrganization(captureId, request.user.organizationId);
+    if (!capture) return reply.code(404).send({ error: 'CAPTURE_NOT_FOUND' });
+    const asset = await prisma.asset.findFirst({ where: { id: assetId, captureId } });
+    if (!asset || !asset.objectKey) return reply.code(404).send({ error: 'ASSET_NOT_FOUND' });
+    const url = await minioSigner.presignedGetObject(config.MINIO_BUCKET_PRIVATE, asset.objectKey, 30 * 60);
+    return reply.send({ url, expiresInSeconds: 1800, kind: asset.kind, mimeType: asset.mimeType ?? null, roomId: asset.roomId ?? null });
+  });
+
+  /**
+   * Every finished Mode A panorama in the organisation, newest first.
+   *
+   * Powers the Studio "360 library": a designer browses all captured panoramas
+   * across properties and attaches one to a room of a design project.
+   */
+  app.get('/v1/panoramas', { preHandler: [app.authenticate] }, async (request) => {
+    const assets = await prisma.asset.findMany({
+      where: {
+        kind: 'PANORAMA',
+        status: { in: ['UPLOADED', 'APPROVED'] },
+        capture: { unit: { property: { organizationId: request.user.organizationId } } }
+      },
+      include: { room: true, capture: { include: { unit: { include: { property: true } } } } },
+      orderBy: { createdAt: 'desc' },
+      take: 200
+    });
+    return assets.map((asset) => {
+      const meta = (asset.metadata ?? {}) as { qa?: { qualityScore?: number }; qualityScore?: number };
+      return {
+        assetId: asset.id,
+        captureId: asset.captureId,
+        roomId: asset.roomId ?? null,
+        roomName: asset.room?.name ?? null,
+        propertyName: asset.capture?.unit?.property?.name ?? null,
+        unitLabel: asset.capture?.unit?.label ?? null,
+        status: asset.status,
+        mimeType: asset.mimeType,
+        qaScore: meta.qa?.qualityScore ?? meta.qualityScore ?? null,
+        createdAt: asset.createdAt
+      };
+    });
   });
 
   app.post('/v1/captures/:captureId/assets/:assetId/privacy-scan', { preHandler: [app.authenticate] }, async (request, reply) => {

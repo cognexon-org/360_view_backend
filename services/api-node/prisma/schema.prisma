@@ -51,6 +51,13 @@ enum AssetKind {
   FLOORPLAN
   GLB
   DESIGN_PREVIEW
+  RGB_KEYFRAME
+  AR_PLANES
+  CAPTURE_MANIFEST
+  MODEL_EVIDENCE
+  FLOORPLAN_SVG
+  DESIGN_RENDER
+  DESIGN_EXPORT
   OTHER
 }
 
@@ -67,6 +74,23 @@ enum JobType {
   PANORAMA_QA
   PRIVACY_SCAN
   CAPTURE_VALIDATION
+  CAPTURE_PACKAGE_VALIDATE
+  KEYFRAME_PROCESS
+  DEPTH_FUSE
+  SURFACE_EXTRACT
+  ROOM_MODEL_INFER
+  OPENING_INFER
+  MODEL_OPTIMIZE
+  MODEL_QA
+  MODEB_GEOMETRY
+  SCENE_ASSEMBLE
+  ASSET_OPTIMIZE
+  RENDER_PREVIEW
+  RENDER_FINAL
+  EXPORT_PARAMETRIC_SHELL_GLB
+  EXPORT_MODEL
+  EXPORT_PLAN
+  EXPORT_SCHEDULE
   ROOM_SHELL
 }
 
@@ -97,7 +121,11 @@ enum VerificationLabel {
 
 enum DesignStatus {
   DRAFT
-  GENERATING
+  MODEL_GENERATING
+  DRAFT_MODEL_READY
+  DESIGNER_CORRECTION
+  DESIGNER_CONFIRMED
+  CLIENT_PRESENTATION_READY
   READY
   PUBLISHED
   ARCHIVED
@@ -197,6 +225,7 @@ model CaptureSession {
   jobs           ProcessingJob[]
   tours          Tour[]
   designProjects DesignProject[]
+  capturePackages CapturePackage[]
 
   @@index([unitId])
   @@index([createdById])
@@ -220,6 +249,13 @@ model Room {
   incomingConnections CaptureConnection[] @relation("ConnectionTo")
   outgoingHotspots Hotspot[] @relation("HotspotFrom")
   incomingHotspots Hotspot[] @relation("HotspotTo")
+  // Mode B stores each measurement as its own row so it can carry provenance
+  // (method, tolerance, who confirmed it, evidence refs). The legacy
+  // `measurements Json?` field above is a different thing: the Mode A inline
+  // {lengthM, widthM} blob written by the capture routes. Both are still in
+  // use, so the relation is named distinctly rather than either being dropped.
+  measurementRecords Measurement[]
+  geometryProposals GeometryProposal[]
 
   @@index([captureId])
 }
@@ -347,11 +383,21 @@ model DesignProject {
   activeVersion   Int          @default(1)
   model           Json
   generatedGlbKey String?
+  geometryStatus  String       @default("DRAFT_MODEL")
+  verificationStatus String    @default("UNCONFIRMED")
+  geometryReport Json?
   publicManifest  Json?
+  publishedAt     DateTime?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   versions        DesignVersion[]
   jobs            ProcessingJob[]
+  comments        DesignComment[]
+  approvals       DesignApproval[]
+  options         DesignOption[]
+  reviews         ModelReview[]
+  exports         ExportRecord[]
+  shareLinks      ClientShareLink[]
 
   @@index([unitId])
   @@index([captureId])
@@ -364,11 +410,39 @@ model DesignVersion {
   version       Int
   model         Json
   notes         String?
+  label         String?
   createdById   String
   createdBy     User          @relation(fields: [createdById], references: [id])
   createdAt     DateTime      @default(now())
 
   @@unique([projectId, version])
+}
+
+model DesignComment {
+  id         String        @id @default(cuid())
+  projectId  String
+  project    DesignProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  authorId   String?
+  body       String
+  elementId  String?
+  resolvedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  @@index([projectId, createdAt])
+}
+
+model DesignApproval {
+  id         String        @id @default(cuid())
+  projectId  String
+  project    DesignProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  version    Int
+  decision   String
+  name       String?
+  contact    String?
+  note       String?
+  createdAt  DateTime      @default(now())
+
+  @@index([projectId, createdAt])
 }
 
 model AuditEvent {
@@ -382,4 +456,206 @@ model AuditEvent {
   createdAt      DateTime @default(now())
 
   @@index([organizationId, createdAt])
+}
+
+
+model CapturePackage {
+  id               String         @id @default(cuid())
+  captureId        String
+  capture          CaptureSession @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  roomId           String?
+  schemaVersion    String
+  captureType      String
+  manifestAssetId  String?
+  archiveAssetId   String?
+  checksumVerified Boolean        @default(false)
+  keyframeCount    Int            @default(0)
+  status           String         @default("UPLOADED")
+  quality          Json?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([captureId, roomId])
+}
+
+model Measurement {
+  id                 String   @id @default(cuid())
+  roomId             String
+  room               Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  label              String
+  valueM             Float
+  startPoint          Json?
+  endPoint            Json?
+  method              String
+  toleranceM          Float?
+  verificationStatus  String   @default("UNVERIFIED")
+  evidenceRefs        Json?
+  acquiredById        String?
+  acquiredAt          DateTime @default(now())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([roomId])
+}
+
+model GeometryProposal {
+  id               String   @id @default(cuid())
+  roomId           String
+  room             Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  proposalType     String
+  geometry         Json
+  confidence       Float
+  uncertaintyM     Float?
+  evidenceRefs     Json?
+  processorVersion String
+  status           String   @default("PROPOSED")
+  acceptedAt       DateTime?
+  rejectedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([roomId, status])
+}
+
+model ModelReview {
+  id               String        @id @default(cuid())
+  projectId        String
+  project          DesignProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  version          Int
+  reviewerId       String?
+  decision         String
+  notes            String?
+  verificationStatus String
+  createdAt        DateTime      @default(now())
+
+  @@index([projectId, createdAt])
+}
+
+model DesignOption {
+  id             String        @id @default(cuid())
+  projectId      String
+  project        DesignProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  status         String        @default("DRAFT")
+  activeVersion  Int           @default(1)
+  model          Json
+  previewAssetId String?
+  createdById    String
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([projectId])
+}
+
+model ExportRecord {
+  id             String        @id @default(cuid())
+  projectId      String
+  project        DesignProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  designOptionId String?
+  version        Int
+  format         String
+  status         String        @default("QUEUED")
+  privateObjectKey String?
+  publicObjectKey  String?
+  mimeType       String?
+  sizeBytes      BigInt?
+  metadata       Json?
+  error          String?
+  createdById    String?
+  createdAt      DateTime      @default(now())
+  completedAt    DateTime?
+
+  @@index([projectId, createdAt])
+}
+
+model ClientShareLink {
+  id             String        @id @default(cuid())
+  projectId      String
+  project        DesignProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  slug           String        @unique
+  designOptionId String?
+  version        Int
+  mode           String        @default("PUBLIC")
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  permissions    Json?
+  createdById    String?
+  createdAt      DateTime      @default(now())
+
+  @@index([projectId])
+}
+
+model CatalogueAsset {
+  id             String   @id @default(cuid())
+  organizationId String?
+  name           String
+  category       String
+  glbObjectKey   String
+  thumbnailKey   String?
+  dimensionsM    Json
+  anchor         Json?
+  placementRules Json?
+  polygonCount   Int?
+  textureBytes   BigInt?
+  metadata       Json?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, category])
+}
+
+model Product {
+  id             String   @id @default(cuid())
+  organizationId String?
+  sku            String
+  name           String
+  category       String
+  supplier       String?
+  catalogueAssetId String?
+  metadata       Json?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  variants       ProductVariant[]
+
+  @@unique([organizationId, sku])
+  @@index([category])
+}
+
+model ProductVariant {
+  id          String   @id @default(cuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name        String
+  materialId  String?
+  price       Float?
+  currency    String?
+  priceVersion String?
+  availability String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([productId])
+}
+
+model Material {
+  id             String   @id @default(cuid())
+  organizationId String?
+  name           String
+  category       String
+  supplier       String?
+  sku            String?
+  textureSet     Json?
+  physical       Json?
+  realWorldSizeM Json?
+  costPerUnit    Float?
+  unit           String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, category])
 }

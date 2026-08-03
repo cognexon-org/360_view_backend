@@ -20,6 +20,9 @@ const schema = z.object({
   VISION_SERVICE_URL: z.string().url().default('http://localhost:8001'),
   VISION_SHARED_SECRET: z.string().min(8),
   API_PORT: z.coerce.number().default(3000),
+  RATE_LIMIT_MAX: z.coerce.number().default(1200),
+  RATE_LIMIT_WINDOW: z.string().default('1 minute'),
+  RATE_LIMIT_UPLOAD_MAX: z.coerce.number().default(6000),
   LOG_LEVEL: z.string().default('info')
 });
 

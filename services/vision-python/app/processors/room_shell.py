@@ -46,7 +46,7 @@ def _wall_meshes(wall: dict[str, Any], room_height: float) -> list[trimesh.Trime
         offset = float(opening["offsetM"])
         width = float(opening["widthM"])
         height = float(opening["heightM"])
-        bottom = float(opening.get("bottomM", 0.0))
+        bottom = float(opening.get("bottomM", opening.get("sillM", 0.0)))
         if offset < last - 1e-6 or offset + width > length + 1e-6:
             raise ValueError(f"Opening {opening.get('id')} is outside or overlaps another opening")
 
@@ -100,12 +100,30 @@ def generate_room_shell(payload: dict[str, Any]) -> dict[str, Any]:
                 scene.add_geometry(mesh, node_name=f"{room_id}-{wall['id']}-{segment_index}")
                 wall_count += 1
 
+        object_count = 0
+        for obj in room.get("objects", []):
+            size = obj.get("size") or obj.get("dimensionsM") or [0.8, 0.8, 0.8]
+            position = obj.get("position") or [0.0, 0.0, float(size[2] if len(size) > 2 else 0.8) / 2.0]
+            try:
+                width, depth, object_height = [max(0.02, float(value)) for value in list(size)[:3]]
+                if len(position) >= 3:
+                    px, py, pz = float(position[0]), float(position[1]), float(position[2])
+                else:
+                    px, py, pz = float(position[0]), float(position[1]), object_height / 2.0
+                mesh = trimesh.creation.box(extents=(width, depth, object_height))
+                mesh.apply_translation((px, py, pz if pz > 0 else object_height / 2.0))
+                scene.add_geometry(mesh, node_name=f"{room_id}-object-{obj.get('id', object_count + 1)}")
+                object_count += 1
+            except Exception:
+                continue
+
         room_summaries.append({
             "id": room_id,
             "name": room.get("name", room_id),
             "areaM2": round(float(polygon.area), 3),
             "heightM": room_height,
             "wallSegments": wall_count,
+            "objects": object_count,
         })
 
     glb = scene.export(file_type="glb")
@@ -122,5 +140,7 @@ def generate_room_shell(payload: dict[str, Any]) -> dict[str, Any]:
         "outputKey": output_key,
         "rooms": room_summaries,
         "geometryCount": len(scene.geometry),
+        "sizeBytes": len(glb),
+        "quality": str(payload.get("quality", "GLB")),
         "warning": "Generated geometry is a design draft. Verify dimensions and structural changes before construction.",
     }

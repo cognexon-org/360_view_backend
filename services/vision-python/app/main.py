@@ -7,13 +7,16 @@ from .processors.capture_validation import validate_capture
 from .processors.panorama import analyze_panorama
 from .processors.privacy import scan_privacy
 from .processors.room_shell import generate_room_shell
+from .processors.exports import export_artifact
+from .processors.render import render_scene
+from .processors.modeb_pipeline import generate_modeb_geometry, validate_capture_packages, validate_model
 from .processors.stitch import stitch_panorama
 from .schemas import JobType, ProcessRequest, ProcessResponse
 
 logging.basicConfig(level=settings.log_level.upper())
 logger = logging.getLogger("propertytour360-vision")
 
-app = FastAPI(title="PropertyTour360 Vision Service", version="1.1.0")
+app = FastAPI(title="PropertyTour360 Vision Service", version="3.1.0")
 
 
 @app.get("/health")
@@ -36,8 +39,18 @@ def process(request: ProcessRequest, x_vision_secret: str = Header(default="")) 
             output = scan_privacy(request.payload)
         elif request.type == JobType.CAPTURE_VALIDATION:
             output = validate_capture(request.payload)
-        elif request.type == JobType.ROOM_SHELL:
+        elif request.type == JobType.CAPTURE_PACKAGE_VALIDATE:
+            output = validate_capture_packages(request.payload)
+        elif request.type in {JobType.KEYFRAME_PROCESS, JobType.DEPTH_FUSE, JobType.SURFACE_EXTRACT, JobType.ROOM_MODEL_INFER, JobType.OPENING_INFER, JobType.MODEL_OPTIMIZE, JobType.MODEB_GEOMETRY}:
+            output = generate_modeb_geometry(request.payload)
+        elif request.type == JobType.MODEL_QA:
+            output = validate_model(request.payload)
+        elif request.type in {JobType.EXPORT_PARAMETRIC_SHELL_GLB, JobType.ROOM_SHELL, JobType.SCENE_ASSEMBLE}:
             output = generate_room_shell(request.payload)
+        elif request.type in {JobType.EXPORT_MODEL, JobType.EXPORT_PLAN, JobType.EXPORT_SCHEDULE}:
+            output = export_artifact(request.payload)
+        elif request.type in {JobType.RENDER_PREVIEW, JobType.RENDER_FINAL}:
+            output = render_scene(request.payload)
         else:
             raise ValueError(f"Unsupported job type: {request.type}")
         return ProcessResponse(success=True, output=output)
