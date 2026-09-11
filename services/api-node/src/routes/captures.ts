@@ -10,6 +10,7 @@ import { audit } from '../lib/audit.js';
 import { badRequest, notFound } from '../lib/http.js';
 import { asJson } from '../lib/json.js';
 import { visionQueue } from '../lib/queue.js';
+import { finalizeCaptureAssetUpload } from '../lib/capture-assets.js';
 
 export async function captureRoutes(app: FastifyInstance) {
   app.get('/v1/captures', { preHandler: [app.authenticate] }, async (request) => {
@@ -262,42 +263,8 @@ export async function captureRoutes(app: FastifyInstance) {
       } catch {
         return reply.code(400).send({ error: 'OBJECT_NOT_UPLOADED' });
       }
-      const updated = await prisma.asset.update({
-        where: { id: asset.id },
-        data: { status: 'UPLOADED', checksumSha256: body.checksumSha256 }
-      });
-
-      const originalFilename = String(((asset.metadata ?? {}) as Record<string, unknown>).originalFilename ?? '');
-      const isCaptureManifest = asset.kind === 'CAPTURE_MANIFEST' && originalFilename === 'manifest.json';
-      const isCaptureArchive = asset.kind === 'MODEL_EVIDENCE' && (
-        asset.mimeType === 'application/zip' || originalFilename.toLowerCase().endsWith('.zip')
-      );
-      if (asset.roomId && (isCaptureManifest || isCaptureArchive)) {
-        const packageId = `${captureId}:${asset.roomId}`;
-        await prisma.capturePackage.upsert({
-          where: { id: packageId },
-          create: {
-            id: packageId,
-            captureId,
-            roomId: asset.roomId,
-            schemaVersion: '2.1',
-            captureType: 'ANDROID_RGBD_ROOM_SCAN',
-            status: 'UPLOADED',
-            manifestAssetId: isCaptureManifest ? asset.id : undefined,
-            archiveAssetId: isCaptureArchive ? asset.id : undefined
-          },
-          update: isCaptureManifest
-            ? { manifestAssetId: asset.id, schemaVersion: '2.1', status: 'UPLOADED', checksumVerified: false }
-            : { archiveAssetId: asset.id, schemaVersion: '2.1', status: 'UPLOADED', checksumVerified: false }
-        });
-      }
-
-      if (asset.kind === 'PANORAMA') {
-        const job = await prisma.processingJob.create({
-          data: { type: 'PANORAMA_QA', assetId: asset.id, captureId, status: 'QUEUED' }
-        });
-        await visionQueue.add('PANORAMA_QA', { jobId: job.id }, { attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
-      }
+      const updated = await finalizeCaptureAssetUpload(captureId, asset.id, body.checksumSha256);
+      if (!updated) return notFound(reply, 'Asset');
       return reply.send(updated);
     } catch (error) {
       return badRequest(reply, error);

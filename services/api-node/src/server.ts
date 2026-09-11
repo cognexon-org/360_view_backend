@@ -17,6 +17,7 @@ import { modeBRoutes } from './routes/modeb.js';
 import { jobRoutes } from './routes/jobs.js';
 import { publicRoutes } from './routes/public.js';
 import { progressRoutes } from './routes/progress.js';
+import { uploadRoutes } from './routes/uploads.js';
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 
@@ -33,7 +34,7 @@ await app.register(jwt, { secret: config.JWT_SECRET });
 // Upload-path routes (presign + complete + job polling) get a much larger
 // budget: a single Mode B room legitimately issues hundreds of calls in a
 // burst, and throttling those is what produced the 429 seen in the field.
-const UPLOAD_PATH = /^\/v1\/captures\/[^/]+\/(uploads|assets)|^\/v1\/jobs\/|^\/v2\/geometry-jobs\//;
+const UPLOAD_PATH = /^\/v1\/captures\/[^/]+\/(uploads|assets)|^\/v2\/captures\/[^/]+\/uploads|^\/v1\/jobs\/|^\/v2\/geometry-jobs\//;
 
 await app.register(rateLimit, {
   max: (request) => (UPLOAD_PATH.test(request.url) ? config.RATE_LIMIT_UPLOAD_MAX : config.RATE_LIMIT_MAX),
@@ -47,7 +48,7 @@ await app.register(rateLimit, {
 });
 await app.register(swagger, {
   openapi: {
-    info: { title: 'ProgressionAi / PropertyTour360 API', version: '3.2.0' },
+    info: { title: 'ProgressionAi / PropertyTour360 API', version: '3.3.0' },
     servers: [{ url: 'http://localhost:3000' }]
   }
 });
@@ -63,7 +64,7 @@ app.decorate('authenticate', async function authenticate(request, reply): Promis
 
 app.get('/', async () => ({
   service: 'ProgressionAi / PropertyTour360 API',
-  version: '3.2.0',
+  version: '3.3.0',
   docs: '/docs',
   health: '/health'
 }));
@@ -76,6 +77,7 @@ await authRoutes(app);
 await organizationRoutes(app);
 await propertyRoutes(app);
 await captureRoutes(app);
+await uploadRoutes(app);
 await tourRoutes(app);
 await designRoutes(app);
 await modeBRoutes(app);

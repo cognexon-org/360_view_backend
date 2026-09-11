@@ -228,6 +228,7 @@ model CaptureSession {
   designProjects DesignProject[]
   capturePackages CapturePackage[]
   snapshot       CaptureSnapshot?
+  resumableUploads ResumableUpload[]
 
   @@index([unitId])
   @@index([createdById])
@@ -260,6 +261,7 @@ model Room {
   // use, so the relation is named distinctly rather than either being dropped.
   measurementRecords Measurement[]
   geometryProposals GeometryProposal[]
+  resumableUploads ResumableUpload[]
 
   @@index([captureId])
   @@index([spatialRoomId])
@@ -304,10 +306,56 @@ model Asset {
   createdAt  DateTime       @default(now())
   updatedAt  DateTime       @updatedAt
   jobs       ProcessingJob[]
+  resumableUpload ResumableUpload?
 
   @@index([captureId])
   @@index([roomId])
   @@index([spatialRoomId])
+}
+
+model ResumableUpload {
+  id                 String         @id @default(cuid())
+  captureId          String
+  capture            CaptureSession @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  roomId             String?
+  room               Room?          @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  assetId            String         @unique
+  asset              Asset          @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  idempotencyKey     String
+  requestFingerprint String
+  filename           String
+  mimeType           String
+  kind               AssetKind
+  totalSizeBytes     BigInt
+  chunkSizeBytes     Int
+  totalParts         Int
+  checksumSha256     String?
+  status             String         @default("CREATED")
+  uploadedBytes      BigInt         @default(0)
+  lastError          String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  completedAt        DateTime?
+  parts              ResumableUploadPart[]
+
+  @@unique([captureId, idempotencyKey])
+  @@index([captureId, status])
+}
+
+model ResumableUploadPart {
+  id             String          @id @default(cuid())
+  uploadId       String
+  upload         ResumableUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  partNumber     Int
+  objectKey      String          @unique
+  sizeBytes      BigInt
+  checksumSha256 String?
+  status         String          @default("PENDING")
+  createdAt      DateTime        @default(now())
+  completedAt    DateTime?
+
+  @@unique([uploadId, partNumber])
+  @@index([uploadId, status])
 }
 
 model ProcessingJob {

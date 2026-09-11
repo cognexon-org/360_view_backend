@@ -9,6 +9,10 @@ import { badRequest, notFound } from '../lib/http.js';
 const captureMode = z.enum(['PROPERTY_TOUR', 'DESIGN_SCAN']);
 const capturePlatform = z.enum(['ANDROID', 'IOS', 'WEB']);
 
+function jsonObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
 function projectInclude() {
   return {
     unit: { include: { property: true } },
@@ -26,6 +30,14 @@ function projectInclude() {
                 id: true, roomId: true, spatialRoomId: true, kind: true, mimeType: true,
                 status: true, sizeBytes: true, metadata: true, quality: true, createdAt: true
               }
+            },
+            resumableUploads: {
+              select: {
+                id: true, roomId: true, assetId: true, filename: true, kind: true, status: true,
+                uploadedBytes: true, totalSizeBytes: true, totalParts: true, completedAt: true, updatedAt: true
+              },
+              orderBy: { createdAt: 'desc' as const },
+              take: 20
             },
             designProjects: {
               select: { id: true, name: true, status: true, slug: true, activeVersion: true, updatedAt: true }
@@ -211,6 +223,68 @@ export async function progressRoutes(app: FastifyInstance) {
     }
   });
 
+  app.post('/v2/progress-captures/:captureId/quality-feedback', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { captureId } = request.params as { captureId: string };
+      const capture = await prisma.captureSession.findFirst({
+        where: { id: captureId, unit: { property: { organizationId: request.user.organizationId } } },
+        include: { snapshot: true }
+      });
+      if (!capture) return notFound(reply, 'Capture');
+      const body = z.object({
+        scope: z.enum(['PREFLIGHT', 'ROOM', 'CAPTURE']).default('CAPTURE'),
+        spatialRoomId: z.string().optional(),
+        report: z.record(z.unknown()),
+        deviceTelemetry: z.record(z.unknown()).optional()
+      }).parse(request.body);
+
+      if (body.scope === 'ROOM') {
+        if (!body.spatialRoomId) return reply.code(400).send({ error: 'SPATIAL_ROOM_REQUIRED' });
+        if (!capture.snapshot) return reply.code(409).send({ error: 'CAPTURE_NOT_LINKED_TO_PROGRESS_PROJECT' });
+        const room = await prisma.spatialRoom.findFirst({ where: { id: body.spatialRoomId, projectId: capture.snapshot.projectId } });
+        if (!room) return notFound(reply, 'Spatial room');
+      }
+
+      const existingQuality = jsonObject(capture.qualityReport);
+      let qualityReport: Record<string, unknown>;
+      if (body.scope === 'PREFLIGHT') {
+        qualityReport = { ...existingQuality, preflight: body.report };
+      } else if (body.scope === 'ROOM' && body.spatialRoomId) {
+        const rooms = jsonObject(existingQuality.rooms);
+        qualityReport = { ...existingQuality, rooms: { ...rooms, [body.spatialRoomId]: body.report } };
+      } else {
+        qualityReport = { ...existingQuality, capture: body.report };
+      }
+      const deviceMetadata = body.deviceTelemetry
+        ? { ...jsonObject(capture.deviceMetadata), ...body.deviceTelemetry }
+        : undefined;
+
+      await prisma.$transaction(async (tx) => {
+        await tx.captureSession.update({
+          where: { id: captureId },
+          data: {
+            qualityReport: asJson(qualityReport),
+            deviceMetadata: deviceMetadata ? asJson(deviceMetadata) : undefined
+          }
+        });
+        if (capture.snapshot) {
+          await tx.captureSnapshot.update({
+            where: { id: capture.snapshot.id },
+            data: { qualityReport: asJson(qualityReport) }
+          });
+        }
+      });
+      await audit({
+        organizationId: request.user.organizationId, actorId: request.user.userId,
+        entityType: 'CaptureSession', entityId: captureId, action: 'QUALITY_FEEDBACK',
+        payload: { scope: body.scope, spatialRoomId: body.spatialRoomId ?? null }
+      });
+      return reply.send({ captureId, qualityReport });
+    } catch (error) {
+      return badRequest(reply, error);
+    }
+  });
+
   app.post('/v2/progress-projects/:projectId/captures/:captureId/link', { preHandler: [app.authenticate] }, async (request, reply) => {
     try {
       const { projectId, captureId } = request.params as { projectId: string; captureId: string };
@@ -255,6 +329,13 @@ export async function progressRoutes(app: FastifyInstance) {
           include: {
             rooms: { orderBy: { sortOrder: 'asc' }, include: { spatialRoom: true } },
             assets: { select: { id: true, roomId: true, spatialRoomId: true, kind: true, status: true, metadata: true, quality: true, createdAt: true } },
+            resumableUploads: {
+              select: {
+                id: true, roomId: true, assetId: true, filename: true, kind: true, status: true,
+                uploadedBytes: true, totalSizeBytes: true, totalParts: true, completedAt: true, updatedAt: true
+              },
+              orderBy: { createdAt: 'desc' }, take: 20
+            },
             jobs: { orderBy: { createdAt: 'desc' }, take: 5 },
             designProjects: { select: { id: true, name: true, status: true, slug: true, activeVersion: true, updatedAt: true } }
           }
