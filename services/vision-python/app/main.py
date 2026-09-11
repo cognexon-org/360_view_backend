@@ -11,6 +11,7 @@ from .processors.exports import export_artifact
 from .processors.render import render_scene
 from .processors.modeb_pipeline import generate_modeb_geometry, validate_capture_packages, validate_model
 from .processors.stitch import stitch_panorama
+from .processors.registration import estimate_registration
 from .schemas import JobType, ProcessRequest, ProcessResponse
 
 logging.basicConfig(level=settings.log_level.upper())
@@ -22,6 +23,16 @@ app = FastAPI(title="PropertyTour360 Vision Service", version="3.1.0")
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/v1/register")
+def register(payload: dict, x_vision_secret: str = Header(default="")) -> dict:
+    if x_vision_secret != settings.vision_shared_secret:
+        raise HTTPException(status_code=401, detail="Invalid service secret")
+    try:
+        return estimate_registration(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/v1/process", response_model=ProcessResponse)

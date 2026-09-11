@@ -5,6 +5,10 @@ import { getCaptureForOrganization, getProgressProjectForOrganization, getUnitFo
 import { audit } from '../lib/audit.js';
 import { asJson } from '../lib/json.js';
 import { badRequest, notFound } from '../lib/http.js';
+import { minioSigner } from '../lib/minio.js';
+import { config } from '../config.js';
+import { callRegistrationService } from '../lib/vision-client.js';
+import { buildEvidenceInventoryDiff } from '../lib/progress-comparison.js';
 
 const captureMode = z.enum(['PROPERTY_TOUR', 'DESIGN_SCAN']);
 const capturePlatform = z.enum(['ANDROID', 'IOS', 'WEB']);
@@ -317,31 +321,112 @@ export async function progressRoutes(app: FastifyInstance) {
   });
 
   app.get('/v2/progress-projects/:projectId/timeline', { preHandler: [app.authenticate] }, async (request, reply) => {
-    const { projectId } = request.params as { projectId: string };
-    const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
-    if (!project) return notFound(reply, 'Progress project');
-    return prisma.captureSnapshot.findMany({
-      where: { projectId },
-      orderBy: { capturedAt: 'desc' },
-      include: {
-        floor: true,
-        capture: {
-          include: {
+    try {
+      const { projectId } = request.params as { projectId: string };
+      const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+      if (!project) return notFound(reply, 'Progress project');
+      const query = z.object({
+        floorId: z.string().optional(), spatialRoomId: z.string().optional(), sourceType: captureMode.optional(),
+        from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional(),
+        limit: z.coerce.number().int().min(1).max(200).default(100)
+      }).parse(request.query ?? {});
+      return prisma.captureSnapshot.findMany({
+        where: {
+          projectId,
+          ...(query.floorId ? { floorId: query.floorId } : {}),
+          ...(query.sourceType ? { sourceType: query.sourceType } : {}),
+          ...((query.from || query.to) ? { capturedAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lte: new Date(query.to) } : {}) } } : {}),
+          ...(query.spatialRoomId ? { capture: { rooms: { some: { spatialRoomId: query.spatialRoomId } } } } : {})
+        },
+        orderBy: { capturedAt: 'desc' },
+        take: query.limit,
+        include: {
+          floor: true,
+          capture: { include: {
             rooms: { orderBy: { sortOrder: 'asc' }, include: { spatialRoom: true } },
             assets: { select: { id: true, roomId: true, spatialRoomId: true, kind: true, status: true, metadata: true, quality: true, createdAt: true } },
-            resumableUploads: {
-              select: {
-                id: true, roomId: true, assetId: true, filename: true, kind: true, status: true,
-                uploadedBytes: true, totalSizeBytes: true, totalParts: true, completedAt: true, updatedAt: true
-              },
-              orderBy: { createdAt: 'desc' }, take: 20
-            },
+            resumableUploads: { select: { id: true, roomId: true, assetId: true, filename: true, kind: true, status: true, uploadedBytes: true, totalSizeBytes: true, totalParts: true, completedAt: true, updatedAt: true }, orderBy: { createdAt: 'desc' }, take: 20 },
             jobs: { orderBy: { createdAt: 'desc' }, take: 5 },
             designProjects: { select: { id: true, name: true, status: true, slug: true, activeVersion: true, updatedAt: true } }
-          }
+          } }
         }
-      }
+      });
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.get('/v2/progress-snapshots/:snapshotId/viewer-manifest', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { snapshotId } = request.params as { snapshotId: string };
+    const snapshot = await prisma.captureSnapshot.findFirst({
+      where: { id: snapshotId, project: { unit: { property: { organizationId: request.user.organizationId } } } },
+      include: { capture: { include: { rooms: { include: { spatialRoom: true } }, assets: true } }, floor: true }
     });
+    if (!snapshot) return notFound(reply, 'Capture snapshot');
+    const panoramas = new Map(snapshot.capture.assets.filter((asset) => asset.kind === 'PANORAMA' && asset.status === 'APPROVED').map((asset) => [asset.id, asset]));
+    const rooms = await Promise.all(snapshot.capture.rooms.map(async (room) => {
+      const panorama = room.panoramaAssetId ? panoramas.get(room.panoramaAssetId) : undefined;
+      return {
+        captureRoomId: room.id, spatialRoomId: room.spatialRoomId, name: room.spatialRoom?.name ?? room.name,
+        panoramaAssetId: panorama?.id ?? null,
+        panoramaUrl: panorama ? await minioSigner.presignedGetObject(config.MINIO_BUCKET_PRIVATE, panorama.objectKey, 15 * 60) : null
+      };
+    }));
+    return reply.send({ snapshotId: snapshot.id, projectId: snapshot.projectId, capturedAt: snapshot.capturedAt, sourceType: snapshot.sourceType, floor: snapshot.floor, expiresInSeconds: 900, rooms });
+  });
+
+  app.get('/v2/progress-projects/:projectId/compare', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { projectId } = request.params as { projectId: string };
+      const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+      if (!project) return notFound(reply, 'Progress project');
+      const query = z.object({ sourceSnapshotId: z.string(), targetSnapshotId: z.string(), spatialRoomId: z.string().optional() }).parse(request.query);
+      const snapshots = await prisma.captureSnapshot.findMany({
+        where: { id: { in: [query.sourceSnapshotId, query.targetSnapshotId] }, projectId },
+        include: { capture: { include: { rooms: true, assets: true } } }
+      });
+      if (snapshots.length !== 2) return reply.code(400).send({ error: 'SNAPSHOT_NOT_IN_PROJECT' });
+      const source = snapshots.find((item) => item.id === query.sourceSnapshotId)!;
+      const target = snapshots.find((item) => item.id === query.targetSnapshotId)!;
+      const registration = await prisma.captureRegistration.findFirst({
+        where: { projectId, OR: [{ sourceSnapshotId: source.id, targetSnapshotId: target.id }, { sourceSnapshotId: target.id, targetSnapshotId: source.id }] },
+        orderBy: { updatedAt: 'desc' }
+      });
+      return reply.send({ diff: buildEvidenceInventoryDiff(source, target, query.spatialRoomId), registration });
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.post('/v2/progress-projects/:projectId/registrations/assist', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { projectId } = request.params as { projectId: string };
+      const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+      if (!project) return notFound(reply, 'Progress project');
+      const anchor = z.object({ source: z.tuple([z.number(), z.number(), z.number()]), target: z.tuple([z.number(), z.number(), z.number()]) });
+      const body = z.object({
+        sourceSnapshotId: z.string(), targetSnapshotId: z.string(), anchors: z.array(anchor).min(1).max(50),
+        overlap: z.number().min(0).max(1).optional(), version: z.string().min(1).max(50).default('anchor-v1')
+      }).refine((value) => value.sourceSnapshotId !== value.targetSnapshotId, 'Snapshots must differ').parse(request.body);
+      const count = await prisma.captureSnapshot.count({ where: { id: { in: [body.sourceSnapshotId, body.targetSnapshotId] }, projectId } });
+      if (count !== 2) return reply.code(400).send({ error: 'SNAPSHOT_NOT_IN_PROJECT' });
+      const estimated = await callRegistrationService({ anchors: body.anchors, overlap: body.overlap });
+      const registration = await prisma.captureRegistration.upsert({
+        where: { sourceSnapshotId_targetSnapshotId_version: { sourceSnapshotId: body.sourceSnapshotId, targetSnapshotId: body.targetSnapshotId, version: body.version } },
+        create: { projectId, sourceSnapshotId: body.sourceSnapshotId, targetSnapshotId: body.targetSnapshotId, transform: asJson({ ...estimated.transform, diagnostics: estimated.diagnostics }), overlap: estimated.overlap, confidence: estimated.confidence, method: estimated.method, version: body.version, status: 'PROPOSED' },
+        update: { transform: asJson({ ...estimated.transform, diagnostics: estimated.diagnostics }), overlap: estimated.overlap, confidence: estimated.confidence, method: estimated.method, status: 'PROPOSED', verifiedById: null }
+      });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'CaptureRegistration', entityId: registration.id, action: 'ASSISTED_REGISTRATION', payload: { anchorCount: body.anchors.length, confidence: estimated.confidence } });
+      return reply.code(201).send(registration);
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.post('/v2/progress-registrations/:registrationId/decision', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { registrationId } = request.params as { registrationId: string };
+      const registration = await prisma.captureRegistration.findFirst({ where: { id: registrationId, project: { unit: { property: { organizationId: request.user.organizationId } } } } });
+      if (!registration) return notFound(reply, 'Capture registration');
+      const body = z.object({ decision: z.enum(['VERIFIED', 'REJECTED']) }).parse(request.body);
+      const updated = await prisma.captureRegistration.update({ where: { id: registrationId }, data: { status: body.decision, verifiedById: body.decision === 'VERIFIED' ? request.user.userId : null } });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'CaptureRegistration', entityId: registrationId, action: body.decision, payload: {} });
+      return reply.send(updated);
+    } catch (error) { return badRequest(reply, error); }
   });
 
   app.post('/v2/progress-projects/:projectId/registrations', { preHandler: [app.authenticate] }, async (request, reply) => {
