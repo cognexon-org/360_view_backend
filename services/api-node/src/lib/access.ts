@@ -25,3 +25,10 @@ export async function getDesignProjectForOrganization(projectId: string, organiz
     where: { id: projectId, unit: { property: { organizationId } } }
   });
 }
+
+export async function getProgressProjectForOrganization(projectId: string, organizationId: string) {
+  return prisma.progressProject.findFirst({
+    where: { id: projectId, unit: { property: { organizationId } } },
+    include: { unit: { include: { property: true } } }
+  });
+}

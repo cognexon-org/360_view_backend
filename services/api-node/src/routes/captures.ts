@@ -93,14 +93,22 @@ export async function captureRoutes(app: FastifyInstance) {
           ceilingHeightM: z.number().positive().max(20).optional(),
           floorPolygon: z.array(z.tuple([z.number(), z.number()])).min(3).optional(),
           measurements: z.record(z.unknown()).optional(),
-          roomModel: z.record(z.unknown()).optional()
+          roomModel: z.record(z.unknown()).optional(),
+          spatialRoomId: z.string().optional()
         })
         .parse(request.body);
+      if (body.spatialRoomId) {
+        const spatialRoom = await prisma.spatialRoom.findFirst({
+          where: { id: body.spatialRoomId, project: { unitId: capture.unitId } }
+        });
+        if (!spatialRoom) return reply.code(400).send({ error: 'SPATIAL_ROOM_NOT_IN_CAPTURE_UNIT' });
+      }
       const room = await prisma.room.create({
         data: {
           captureId,
           name: body.name,
           sortOrder: body.sortOrder ?? 0,
+          spatialRoomId: body.spatialRoomId,
           ceilingHeightM: body.ceilingHeightM,
           floorPolygon: body.floorPolygon ? asJson(body.floorPolygon) : undefined,
           measurements: body.measurements ? asJson(body.measurements) : undefined,
@@ -130,9 +138,16 @@ export async function captureRoutes(app: FastifyInstance) {
           openings: z.array(z.record(z.unknown())).nullable().optional(),
           roomPlacement: z.record(z.unknown()).nullable().optional(),
           roomModel: z.record(z.unknown()).nullable().optional(),
-          panoramaAssetId: z.string().nullable().optional()
+          panoramaAssetId: z.string().nullable().optional(),
+          spatialRoomId: z.string().nullable().optional()
         })
         .parse(request.body);
+      if (body.spatialRoomId) {
+        const spatialRoom = await prisma.spatialRoom.findFirst({
+          where: { id: body.spatialRoomId, project: { unitId: capture.unitId } }
+        });
+        if (!spatialRoom) return reply.code(400).send({ error: 'SPATIAL_ROOM_NOT_IN_CAPTURE_UNIT' });
+      }
       const existingModel = existing.roomModel && typeof existing.roomModel === 'object' && !Array.isArray(existing.roomModel)
         ? existing.roomModel as Record<string, unknown>
         : {};
@@ -156,7 +171,8 @@ export async function captureRoutes(app: FastifyInstance) {
           floorPolygon: body.floorPolygon === null ? undefined : body.floorPolygon ? asJson(body.floorPolygon) : undefined,
           measurements: body.measurements === null ? undefined : body.measurements ? asJson(body.measurements) : undefined,
           roomModel: mergedRoomModel ? asJson(mergedRoomModel) : undefined,
-          panoramaAssetId: body.panoramaAssetId
+          panoramaAssetId: body.panoramaAssetId,
+          spatialRoomId: body.spatialRoomId === null ? null : body.spatialRoomId
         }
       });
       return reply.send(room);
@@ -206,15 +222,18 @@ export async function captureRoutes(app: FastifyInstance) {
           sizeBytes: z.number().int().positive().max(8 * 1024 * 1024 * 1024)
         })
         .parse(request.body);
+      let spatialRoomId: string | undefined;
       if (body.roomId) {
         const room = await prisma.room.findFirst({ where: { id: body.roomId, captureId } });
         if (!room) return notFound(reply, 'Room');
+        spatialRoomId = room.spatialRoomId ?? undefined;
       }
       const objectKey = `org/${request.user.organizationId}/capture/${captureId}/${nanoid(12)}-${safeObjectName(body.filename)}`;
       const asset = await prisma.asset.create({
         data: {
           captureId,
           roomId: body.roomId,
+          spatialRoomId,
           kind: body.kind,
           objectKey,
           mimeType: body.mimeType,
@@ -459,7 +478,10 @@ export async function captureRoutes(app: FastifyInstance) {
     const job = await prisma.processingJob.create({
       data: { type: 'CAPTURE_VALIDATION', captureId, status: 'QUEUED' }
     });
-    await prisma.captureSession.update({ where: { id: captureId }, data: { status: 'PROCESSING', completedAt: new Date() } });
+    await prisma.$transaction([
+      prisma.captureSession.update({ where: { id: captureId }, data: { status: 'PROCESSING', completedAt: new Date() } }),
+      prisma.captureSnapshot.updateMany({ where: { captureId }, data: { status: 'PROCESSING' } })
+    ]);
     await visionQueue.add('CAPTURE_VALIDATION', { jobId: job.id }, { attempts: 2, backoff: { type: 'exponential', delay: 5000 } });
     return reply.code(202).send({ jobId: job.id, status: job.status });
   });

@@ -16,6 +16,7 @@ import { designRoutes } from './routes/design.js';
 import { modeBRoutes } from './routes/modeb.js';
 import { jobRoutes } from './routes/jobs.js';
 import { publicRoutes } from './routes/public.js';
+import { progressRoutes } from './routes/progress.js';
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 
@@ -46,7 +47,7 @@ await app.register(rateLimit, {
 });
 await app.register(swagger, {
   openapi: {
-    info: { title: 'PropertyTour360 API', version: '3.1.0' },
+    info: { title: 'ProgressionAi / PropertyTour360 API', version: '3.2.0' },
     servers: [{ url: 'http://localhost:3000' }]
   }
 });
@@ -61,8 +62,8 @@ app.decorate('authenticate', async function authenticate(request, reply): Promis
 });
 
 app.get('/', async () => ({
-  service: 'PropertyTour360 API',
-  version: '3.1.0',
+  service: 'ProgressionAi / PropertyTour360 API',
+  version: '3.2.0',
   docs: '/docs',
   health: '/health'
 }));
@@ -80,6 +81,7 @@ await designRoutes(app);
 await modeBRoutes(app);
 await jobRoutes(app);
 await publicRoutes(app);
+await progressRoutes(app);
 
 app.setErrorHandler((error: FastifyError, request, reply) => {
   request.log.error(error);

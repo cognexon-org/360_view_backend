@@ -385,16 +385,20 @@ const worker = new Worker(
           const sizeBytes = typeof output.sizeBytes === 'number' ? output.sizeBytes : 0;
           const qa = (output.qa ?? {}) as { approved?: boolean };
           if (!input.roomId || !outputKey || sizeBytes <= 0) throw new Error('Invalid panorama stitch result');
+          const spatialIdentity = await tx.room.findUnique({ where: { id: input.roomId }, select: { spatialRoomId: true } });
           const stitchedAsset = await tx.asset.create({
             data: {
               captureId: job.captureId,
               roomId: input.roomId,
+              spatialRoomId: spatialIdentity?.spatialRoomId ?? undefined,
               kind: 'PANORAMA',
               objectKey: outputKey,
               mimeType,
               sizeBytes: BigInt(sizeBytes),
               status: qa.approved === true ? 'APPROVED' : 'REJECTED',
-              metadata: asJson(output)
+              metadata: asJson(output),
+              quality: asJson(qa),
+              provenance: asJson({ processor: 'PANORAMA_STITCH', jobId: job.id })
             }
           });
           if (qa.approved === true) {
@@ -406,7 +410,7 @@ const worker = new Worker(
           const approved = output.approved === true;
           const updatedAsset = await tx.asset.update({
             where: { id: job.assetId },
-            data: { status: approved ? 'APPROVED' : 'REJECTED', metadata: asJson(output) }
+            data: { status: approved ? 'APPROVED' : 'REJECTED', metadata: asJson(output), quality: asJson(output) }
           });
           if (approved && updatedAsset.roomId) {
             await tx.room.update({ where: { id: updatedAsset.roomId }, data: { panoramaAssetId: updatedAsset.id } });
@@ -420,6 +424,14 @@ const worker = new Worker(
             data: {
               status: ready ? 'READY' : 'RECAPTURE_REQUIRED',
               qualityReport: asJson(output)
+            }
+          });
+          await tx.captureSnapshot.updateMany({
+            where: { captureId: job.captureId },
+            data: {
+              status: ready ? 'READY' : 'RECAPTURE_REQUIRED',
+              qualityReport: asJson(output),
+              publishedAt: ready ? new Date() : null
             }
           });
           if (job.capture?.mode === 'DESIGN_SCAN') {

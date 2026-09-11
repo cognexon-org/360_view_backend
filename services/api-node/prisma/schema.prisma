@@ -199,6 +199,7 @@ model Unit {
   captures    CaptureSession[]
   tours       Tour[]
   designProjects DesignProject[]
+  progressProjects ProgressProject[]
 
   @@index([propertyId])
 }
@@ -226,6 +227,7 @@ model CaptureSession {
   tours          Tour[]
   designProjects DesignProject[]
   capturePackages CapturePackage[]
+  snapshot       CaptureSnapshot?
 
   @@index([unitId])
   @@index([createdById])
@@ -238,6 +240,8 @@ model Room {
   name             String
   sortOrder        Int            @default(0)
   panoramaAssetId  String?
+  spatialRoomId    String?
+  spatialRoom      SpatialRoom? @relation(fields: [spatialRoomId], references: [id], onDelete: SetNull)
   ceilingHeightM   Float?
   floorPolygon     Json?
   measurements     Json?
@@ -258,6 +262,7 @@ model Room {
   geometryProposals GeometryProposal[]
 
   @@index([captureId])
+  @@index([spatialRoomId])
 }
 
 model CaptureConnection {
@@ -281,6 +286,8 @@ model Asset {
   capture    CaptureSession @relation(fields: [captureId], references: [id], onDelete: Cascade)
   roomId     String?
   room       Room?          @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  spatialRoomId String?
+  spatialRoom SpatialRoom?  @relation(fields: [spatialRoomId], references: [id], onDelete: SetNull)
   kind       AssetKind
   objectKey  String         @unique
   mimeType   String
@@ -288,12 +295,19 @@ model Asset {
   checksumSha256 String?
   status     AssetStatus    @default(PENDING)
   metadata   Json?
+  coordinateFrame Json?
+  spatialTransform Json?
+  spatialVersion Int @default(1)
+  quality    Json?
+  provenance Json?
+  visibility String @default("PRIVATE")
   createdAt  DateTime       @default(now())
   updatedAt  DateTime       @updatedAt
   jobs       ProcessingJob[]
 
   @@index([captureId])
   @@index([roomId])
+  @@index([spatialRoomId])
 }
 
 model ProcessingJob {
@@ -659,3 +673,188 @@ model Material {
 
   @@index([organizationId, category])
 }
+
+// -----------------------------------------------------------------------------
+// ProgressionAi spatial-temporal foundation (v1)
+// -----------------------------------------------------------------------------
+// These entities are additive. Existing PropertyTour360 Mode A / Mode B records
+// continue to work unchanged while new captures can be attached to a stable
+// project/floor/room identity that survives across capture sessions.
+
+model ProgressProject {
+  id              String   @id @default(cuid())
+  unitId          String
+  unit            Unit     @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  name            String
+  status          String   @default("ACTIVE")
+  captureCadence  String?
+  projectFrame    Json?
+  progressPolicy  Json?
+  createdById     String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  floors          SpatialFloor[]
+  rooms           SpatialRoom[]
+  snapshots       CaptureSnapshot[]
+  registrations   CaptureRegistration[]
+  issues          ProjectIssue[]
+  observations    AiObservation[]
+
+  @@index([unitId])
+  @@index([createdById])
+}
+
+model SpatialFloor {
+  id          String          @id @default(cuid())
+  projectId   String
+  project     ProgressProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  level       Int?
+  elevationM  Float?
+  transform   Json?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  rooms       SpatialRoom[]
+  snapshots   CaptureSnapshot[]
+
+  @@index([projectId])
+}
+
+model SpatialRoom {
+  id                String          @id @default(cuid())
+  projectId         String
+  project           ProgressProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  floorId           String?
+  floor             SpatialFloor?   @relation(fields: [floorId], references: [id], onDelete: SetNull)
+  name              String
+  roomType          String?
+  sortOrder         Int             @default(0)
+  canonicalFrame    Json?
+  canonicalGeometry Json?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  captureRooms      Room[]
+  assets            Asset[]
+  issues            ProjectIssue[]
+  observations      AiObservation[]
+
+  @@index([projectId])
+  @@index([floorId])
+  @@index([projectId, name])
+}
+
+model CaptureSnapshot {
+  id                    String          @id @default(cuid())
+  projectId             String
+  project               ProgressProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  captureId             String          @unique
+  capture               CaptureSession  @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  floorId               String?
+  floor                 SpatialFloor?   @relation(fields: [floorId], references: [id], onDelete: SetNull)
+  capturedAt            DateTime        @default(now())
+  sourceType            String
+  status                String          @default("CAPTURING")
+  spatialScope          Json?
+  localCoordinateFrame  Json?
+  projectTransform      Json?
+  qualityReport         Json?
+  processingVersion     String?
+  reconstructionVersion String?
+  publishedAt           DateTime?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  sourceRegistrations   CaptureRegistration[] @relation("RegistrationSource")
+  targetRegistrations   CaptureRegistration[] @relation("RegistrationTarget")
+  issues                ProjectIssue[]
+  sourceObservations    AiObservation[] @relation("ObservationSource")
+  targetObservations    AiObservation[] @relation("ObservationTarget")
+
+  @@index([projectId, capturedAt])
+  @@index([floorId])
+}
+
+model CaptureRegistration {
+  id               String          @id @default(cuid())
+  projectId        String
+  project          ProgressProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceSnapshotId String
+  sourceSnapshot   CaptureSnapshot @relation("RegistrationSource", fields: [sourceSnapshotId], references: [id], onDelete: Cascade)
+  targetSnapshotId String
+  targetSnapshot   CaptureSnapshot @relation("RegistrationTarget", fields: [targetSnapshotId], references: [id], onDelete: Cascade)
+  transform        Json
+  overlap          Float?
+  confidence       Float
+  method           String
+  version          String
+  status           String          @default("PROPOSED")
+  verifiedById     String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@unique([sourceSnapshotId, targetSnapshotId, version])
+  @@index([projectId])
+}
+
+model ProjectIssue {
+  id                String           @id @default(cuid())
+  projectId         String
+  project           ProgressProject  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  spatialRoomId     String?
+  spatialRoom       SpatialRoom?     @relation(fields: [spatialRoomId], references: [id], onDelete: SetNull)
+  captureSnapshotId String?
+  captureSnapshot   CaptureSnapshot? @relation(fields: [captureSnapshotId], references: [id], onDelete: SetNull)
+  spatialRef        Json?
+  title             String
+  description       String?
+  status            String           @default("OPEN")
+  severity          String           @default("INFO")
+  assigneeId        String?
+  verification      String?
+  evidenceRefs      Json?
+  createdById       String
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([projectId, status])
+  @@index([spatialRoomId])
+}
+
+model AiObservation {
+  id               String           @id @default(cuid())
+  projectId        String
+  project          ProgressProject  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceSnapshotId String?
+  sourceSnapshot   CaptureSnapshot? @relation("ObservationSource", fields: [sourceSnapshotId], references: [id], onDelete: SetNull)
+  targetSnapshotId String?
+  targetSnapshot   CaptureSnapshot? @relation("ObservationTarget", fields: [targetSnapshotId], references: [id], onDelete: SetNull)
+  spatialRoomId    String?
+  spatialRoom      SpatialRoom?     @relation(fields: [spatialRoomId], references: [id], onDelete: SetNull)
+  observationType  String
+  spatialRef       Json?
+  structuredEvidence Json
+  confidence       Float
+  modelVersion     String?
+  policyVersion    String?
+  status           String           @default("PROPOSED")
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  decisions        ObservationDecision[]
+
+  @@index([projectId, status])
+  @@index([spatialRoomId])
+}
+
+model ObservationDecision {
+  id             String        @id @default(cuid())
+  observationId  String
+  observation    AiObservation @relation(fields: [observationId], references: [id], onDelete: Cascade)
+  actorId        String
+  decision       String
+  correctedValue Json?
+  note           String?
+  createdAt      DateTime      @default(now())
+
+  @@index([observationId])
+  @@index([actorId])
+}
+
