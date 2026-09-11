@@ -9,6 +9,7 @@ import { minioSigner } from '../lib/minio.js';
 import { config } from '../config.js';
 import { callRegistrationService } from '../lib/vision-client.js';
 import { buildEvidenceInventoryDiff } from '../lib/progress-comparison.js';
+import { buildDesignRealityDeviationReport, parsePolygon } from '../lib/design-reality-deviation.js';
 
 const captureMode = z.enum(['PROPERTY_TOUR', 'DESIGN_SCAN']);
 const capturePlatform = z.enum(['ANDROID', 'IOS', 'WEB']);
@@ -51,6 +52,10 @@ function projectInclude() {
       }
     },
     registrations: { orderBy: { createdAt: 'desc' as const }, take: 50 },
+    designRealityAlignments: {
+      orderBy: { updatedAt: 'desc' as const }, take: 50,
+      include: { evaluations: { orderBy: { createdAt: 'desc' as const }, take: 3 } }
+    },
     issues: { orderBy: { updatedAt: 'desc' as const }, take: 100 },
     observations: { orderBy: { createdAt: 'desc' as const }, take: 100 }
   };
@@ -186,11 +191,26 @@ export async function progressRoutes(app: FastifyInstance) {
         capturedAt: z.string().datetime({ offset: true }).optional(),
         deviceMetadata: z.record(z.unknown()).optional(),
         checklist: z.record(z.unknown()).optional(),
-        spatialScope: z.record(z.unknown()).optional()
+        spatialScope: z.record(z.unknown()).optional(),
+        designReferenceProjectId: z.string().optional(),
+        designReferenceVersion: z.number().int().positive().optional()
       }).parse(request.body);
       if (body.floorId) {
         const floor = await prisma.spatialFloor.findFirst({ where: { id: body.floorId, projectId } });
         if (!floor) return notFound(reply, 'Floor');
+      }
+      if (body.designReferenceProjectId) {
+        const designReference = await prisma.designProject.findFirst({
+          where: { id: body.designReferenceProjectId, unitId: project.unitId },
+          include: { versions: { where: body.designReferenceVersion ? { version: body.designReferenceVersion } : undefined, take: 1 } }
+        });
+        if (!designReference) return reply.code(400).send({ error: 'DESIGN_REFERENCE_NOT_IN_PROJECT_UNIT' });
+        const requestedVersion = body.designReferenceVersion ?? designReference.activeVersion;
+        if (requestedVersion !== designReference.activeVersion && designReference.versions.length === 0) {
+          const exists = await prisma.designVersion.count({ where: { projectId: designReference.id, version: requestedVersion } });
+          if (!exists) return reply.code(400).send({ error: 'DESIGN_REFERENCE_VERSION_NOT_FOUND' });
+        }
+        body.designReferenceVersion = requestedVersion;
       }
       const capturedAt = body.capturedAt ? new Date(body.capturedAt) : new Date();
       const result = await prisma.$transaction(async (tx) => {
@@ -209,6 +229,8 @@ export async function progressRoutes(app: FastifyInstance) {
           data: {
             projectId, captureId: capture.id, floorId: body.floorId, capturedAt,
             sourceType: body.mode,
+            designReferenceProjectId: body.designReferenceProjectId,
+            designReferenceVersion: body.designReferenceVersion,
             spatialScope: body.spatialScope ? asJson(body.spatialScope) : body.floorId ? asJson({ floorId: body.floorId }) : undefined
           }
         });
@@ -219,7 +241,7 @@ export async function progressRoutes(app: FastifyInstance) {
         organizationId: request.user.organizationId,
         actorId: request.user.userId,
         entityType: 'CaptureSnapshot', entityId: result.snapshot.id, action: 'CREATE',
-        payload: { projectId, captureId: result.capture.id, mode: body.mode }
+        payload: { projectId, captureId: result.capture.id, mode: body.mode, designReferenceProjectId: body.designReferenceProjectId ?? null, designReferenceVersion: body.designReferenceVersion ?? null }
       });
       return reply.code(201).send(result);
     } catch (error) {
@@ -449,6 +471,117 @@ export async function progressRoutes(app: FastifyInstance) {
     } catch (error) {
       return badRequest(reply, error);
     }
+  });
+
+  app.get('/v2/progress-projects/:projectId/design-intents', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { projectId } = request.params as { projectId: string };
+    const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+    if (!project) return notFound(reply, 'Progress project');
+    const rows = await prisma.designProject.findMany({
+      where: { unitId: project.unitId },
+      include: {
+        versions: { orderBy: { version: 'desc' }, take: 20, select: { version: true, label: true, createdAt: true } },
+        capture: { include: { rooms: { select: { id: true, name: true, spatialRoomId: true } } } }
+      },
+      orderBy: { updatedAt: 'desc' }
+    });
+    return reply.send(rows.map((row) => ({
+      id: row.id, name: row.name, status: row.status, verificationStatus: row.verificationStatus,
+      activeVersion: row.activeVersion, updatedAt: row.updatedAt,
+      versions: row.versions,
+      roomMappings: row.capture.rooms.filter((room) => room.spatialRoomId).map((room) => ({ captureRoomId: room.id, spatialRoomId: room.spatialRoomId, name: room.name }))
+    })));
+  });
+
+  app.post('/v2/progress-projects/:projectId/design-reality-alignments/assist', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { projectId } = request.params as { projectId: string };
+      const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+      if (!project) return notFound(reply, 'Progress project');
+      const anchorSchema = z.object({ source: z.tuple([z.number(), z.number(), z.number()]), target: z.tuple([z.number(), z.number(), z.number()]) });
+      const body = z.object({
+        designProjectId: z.string(), designVersion: z.number().int().positive(), realitySnapshotId: z.string(), spatialRoomId: z.string(),
+        anchors: z.array(anchorSchema).min(1).max(50), overlap: z.number().min(0).max(1).optional(), version: z.string().min(1).max(50).default('design-reality-anchor-v1')
+      }).parse(request.body);
+      const [designProject, realitySnapshot, spatialRoom] = await Promise.all([
+        prisma.designProject.findFirst({ where: { id: body.designProjectId, unitId: project.unitId }, include: { capture: { include: { rooms: true } }, versions: { where: { version: body.designVersion }, take: 1 } } }),
+        prisma.captureSnapshot.findFirst({ where: { id: body.realitySnapshotId, projectId }, include: { capture: { include: { rooms: true } } } }),
+        prisma.spatialRoom.findFirst({ where: { id: body.spatialRoomId, projectId } })
+      ]);
+      if (!designProject || designProject.versions.length !== 1) return reply.code(400).send({ error: 'DESIGN_VERSION_NOT_IN_PROJECT_UNIT' });
+      if (!realitySnapshot) return reply.code(400).send({ error: 'REALITY_SNAPSHOT_NOT_IN_PROJECT' });
+      if (!spatialRoom) return reply.code(400).send({ error: 'SPATIAL_ROOM_NOT_IN_PROJECT' });
+      if (!designProject.capture.rooms.some((room) => room.spatialRoomId === body.spatialRoomId)) return reply.code(409).send({ error: 'DESIGN_ROOM_NOT_LINKED_TO_SPATIAL_ROOM' });
+      if (!realitySnapshot.capture.rooms.some((room) => room.spatialRoomId === body.spatialRoomId)) return reply.code(409).send({ error: 'REALITY_ROOM_NOT_LINKED_TO_SPATIAL_ROOM' });
+
+      const estimated = await callRegistrationService({ anchors: body.anchors, overlap: body.overlap });
+      const previous = await prisma.designRealityAlignment.findFirst({
+        where: { projectId, designProjectId: body.designProjectId, designVersion: body.designVersion, realitySnapshotId: body.realitySnapshotId, spatialRoomId: body.spatialRoomId, version: body.version },
+        orderBy: { updatedAt: 'desc' }
+      });
+      const data = {
+        transform: asJson(estimated.transform), confidence: estimated.confidence, overlap: estimated.overlap,
+        method: estimated.method, version: body.version, diagnostics: asJson(estimated.diagnostics), status: 'PROPOSED', verifiedById: null
+      };
+      const alignment = previous
+        ? await prisma.designRealityAlignment.update({ where: { id: previous.id }, data })
+        : await prisma.designRealityAlignment.create({ data: { projectId, designProjectId: body.designProjectId, designVersion: body.designVersion, realitySnapshotId: body.realitySnapshotId, spatialRoomId: body.spatialRoomId, ...data } });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'DesignRealityAlignment', entityId: alignment.id, action: 'ASSISTED_ALIGNMENT', payload: { anchorCount: body.anchors.length, confidence: estimated.confidence, designVersion: body.designVersion } });
+      return reply.code(201).send(alignment);
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.post('/v2/design-reality-alignments/:alignmentId/decision', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { alignmentId } = request.params as { alignmentId: string };
+      const alignment = await prisma.designRealityAlignment.findFirst({ where: { id: alignmentId, project: { unit: { property: { organizationId: request.user.organizationId } } } } });
+      if (!alignment) return notFound(reply, 'Design reality alignment');
+      const body = z.object({ decision: z.enum(['VERIFIED', 'REJECTED']) }).parse(request.body);
+      const updated = await prisma.designRealityAlignment.update({ where: { id: alignmentId }, data: { status: body.decision, verifiedById: body.decision === 'VERIFIED' ? request.user.userId : null } });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'DesignRealityAlignment', entityId: alignmentId, action: body.decision, payload: {} });
+      return reply.send(updated);
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.post('/v2/design-reality-alignments/:alignmentId/evaluate', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { alignmentId } = request.params as { alignmentId: string };
+      const alignment = await prisma.designRealityAlignment.findFirst({
+        where: { id: alignmentId, project: { unit: { property: { organizationId: request.user.organizationId } } } },
+        include: {
+          designProject: { include: { capture: { include: { rooms: true } }, versions: true } },
+          realitySnapshot: { include: { capture: { include: { rooms: true } } } },
+          spatialRoom: true
+        }
+      });
+      if (!alignment) return notFound(reply, 'Design reality alignment');
+      if (alignment.status !== 'VERIFIED') return reply.code(409).send({ error: 'ALIGNMENT_REQUIRES_HUMAN_VERIFICATION' });
+      const body = z.object({ tolerances: z.object({ boundaryM: z.number().positive().max(1).optional(), areaRatio: z.number().positive().max(1).optional(), ceilingHeightM: z.number().positive().max(1).optional() }).optional() }).parse(request.body ?? {});
+      const version = alignment.designProject.versions.find((row) => row.version === alignment.designVersion);
+      if (!version) return reply.code(409).send({ error: 'DESIGN_VERSION_MISSING' });
+      const model = jsonObject(version.model);
+      const modelRooms = Array.isArray(model.rooms) ? model.rooms.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row)) : [];
+      const designCaptureRoom = alignment.designProject.capture.rooms.find((room) => room.spatialRoomId === alignment.spatialRoomId);
+      const realityRoom = alignment.realitySnapshot.capture.rooms.find((room) => room.spatialRoomId === alignment.spatialRoomId);
+      if (!designCaptureRoom || !realityRoom) return reply.code(409).send({ error: 'SPATIAL_ROOM_MAPPING_MISSING' });
+      const designRoomRaw = modelRooms.find((room) => String(room.id ?? '') === designCaptureRoom.id)
+        ?? modelRooms.find((room) => String(room.name ?? '').toLowerCase() === designCaptureRoom.name.toLowerCase());
+      if (!designRoomRaw) return reply.code(409).send({ error: 'DESIGN_MODEL_ROOM_NOT_FOUND' });
+      const designPolygon = parsePolygon(designRoomRaw.floorPolygon);
+      const realityPolygon = parsePolygon(realityRoom.floorPolygon);
+      if (designPolygon.length < 3 || realityPolygon.length < 3) return reply.code(409).send({ error: 'GEOMETRY_REQUIRED_FOR_DEVIATION', designPolygonPoints: designPolygon.length, realityPolygonPoints: realityPolygon.length });
+      const transform = jsonObject(alignment.transform);
+      const report = buildDesignRealityDeviationReport({
+        designRoom: { id: String(designRoomRaw.id ?? designCaptureRoom.id), name: String(designRoomRaw.name ?? designCaptureRoom.name), heightM: Number(designRoomRaw.heightM ?? 0) || undefined, floorPolygon: designPolygon },
+        realityRoom: { id: realityRoom.id, name: realityRoom.name, ceilingHeightM: realityRoom.ceilingHeightM, floorPolygon: realityPolygon },
+        transform,
+        tolerances: body.tolerances,
+        engineVersion: 'design-reality-v1'
+      });
+      const evaluation = await prisma.designRealityEvaluation.create({ data: { projectId: alignment.projectId, alignmentId: alignment.id, engineVersion: report.engineVersion, report: asJson(report), createdById: request.user.userId } });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'DesignRealityEvaluation', entityId: evaluation.id, action: 'EVALUATE', payload: { alignmentId, deviationCount: report.deviations.length } });
+      return reply.code(201).send({ ...evaluation, report });
+    } catch (error) { return badRequest(reply, error); }
   });
 
   app.post('/v2/progress-projects/:projectId/issues', { preHandler: [app.authenticate] }, async (request, reply) => {

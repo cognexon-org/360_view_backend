@@ -460,6 +460,8 @@ model DesignProject {
   reviews         ModelReview[]
   exports         ExportRecord[]
   shareLinks      ClientShareLink[]
+  progressSnapshots CaptureSnapshot[] @relation("SnapshotDesignReference")
+  designRealityAlignments DesignRealityAlignment[]
 
   @@index([unitId])
   @@index([captureId])
@@ -747,6 +749,8 @@ model ProgressProject {
   registrations   CaptureRegistration[]
   issues          ProjectIssue[]
   observations    AiObservation[]
+  designRealityAlignments DesignRealityAlignment[]
+  designRealityEvaluations DesignRealityEvaluation[]
 
   @@index([unitId])
   @@index([createdById])
@@ -785,6 +789,7 @@ model SpatialRoom {
   assets            Asset[]
   issues            ProjectIssue[]
   observations      AiObservation[]
+  designRealityAlignments DesignRealityAlignment[]
 
   @@index([projectId])
   @@index([floorId])
@@ -808,6 +813,9 @@ model CaptureSnapshot {
   qualityReport         Json?
   processingVersion     String?
   reconstructionVersion String?
+  designReferenceProjectId String?
+  designReferenceProject DesignProject? @relation("SnapshotDesignReference", fields: [designReferenceProjectId], references: [id], onDelete: SetNull)
+  designReferenceVersion Int?
   publishedAt           DateTime?
   createdAt             DateTime        @default(now())
   updatedAt             DateTime        @updatedAt
@@ -816,8 +824,10 @@ model CaptureSnapshot {
   issues                ProjectIssue[]
   sourceObservations    AiObservation[] @relation("ObservationSource")
   targetObservations    AiObservation[] @relation("ObservationTarget")
+  designRealityAlignments DesignRealityAlignment[]
 
   @@index([projectId, capturedAt])
+  @@index([designReferenceProjectId])
   @@index([floorId])
 }
 
@@ -841,6 +851,50 @@ model CaptureRegistration {
 
   @@unique([sourceSnapshotId, targetSnapshotId, version])
   @@index([projectId])
+}
+
+model DesignRealityAlignment {
+  id                String          @id @default(cuid())
+  projectId         String
+  project           ProgressProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  designProjectId   String
+  designProject     DesignProject   @relation(fields: [designProjectId], references: [id], onDelete: Cascade)
+  designVersion     Int
+  realitySnapshotId String
+  realitySnapshot   CaptureSnapshot @relation(fields: [realitySnapshotId], references: [id], onDelete: Cascade)
+  spatialRoomId     String
+  spatialRoom       SpatialRoom     @relation(fields: [spatialRoomId], references: [id], onDelete: Cascade)
+  transform         Json
+  confidence        Float
+  overlap           Float?
+  method             String
+  version            String
+  diagnostics        Json?
+  status             String          @default("PROPOSED")
+  verifiedById       String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  evaluations        DesignRealityEvaluation[]
+
+  @@index([projectId, updatedAt])
+  @@index([designProjectId, designVersion])
+  @@index([realitySnapshotId])
+  @@index([spatialRoomId])
+}
+
+model DesignRealityEvaluation {
+  id            String                 @id @default(cuid())
+  projectId     String
+  project       ProgressProject        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  alignmentId   String
+  alignment     DesignRealityAlignment @relation(fields: [alignmentId], references: [id], onDelete: Cascade)
+  engineVersion String
+  report        Json
+  createdById   String
+  createdAt     DateTime               @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([alignmentId, createdAt])
 }
 
 model ProjectIssue {
