@@ -12,6 +12,7 @@ from .processors.render import render_scene
 from .processors.modeb_pipeline import generate_modeb_geometry, validate_capture_packages, validate_model
 from .processors.stitch import stitch_panorama
 from .processors.registration import estimate_registration
+from .processors.progress_intelligence import analyze_progress
 from .schemas import JobType, ProcessRequest, ProcessResponse
 
 logging.basicConfig(level=settings.log_level.upper())
@@ -62,6 +63,8 @@ def process(request: ProcessRequest, x_vision_secret: str = Header(default="")) 
             output = export_artifact(request.payload)
         elif request.type in {JobType.RENDER_PREVIEW, JobType.RENDER_FINAL}:
             output = render_scene(request.payload)
+        elif request.type == JobType.PROGRESS_INTELLIGENCE:
+            output = analyze_progress(request.payload)
         else:
             raise ValueError(f"Unsupported job type: {request.type}")
         return ProcessResponse(success=True, output=output)

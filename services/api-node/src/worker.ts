@@ -325,6 +325,43 @@ async function buildPayload(jobId: string) {
         }
       };
     }
+    case 'PROGRESS_INTELLIGENCE': {
+      const input = (job.input ?? {}) as { analysisRunId?: string };
+      if (!input.analysisRunId) throw new Error('PROGRESS_INTELLIGENCE requires analysisRunId');
+      const run = await prisma.progressAnalysisRun.findUnique({
+        where: { id: input.analysisRunId },
+        include: { registration: true, spatialRoom: true, sourceSnapshot: true, targetSnapshot: true }
+      });
+      if (!run) throw new Error(`Progress analysis run ${input.analysisRunId} not found`);
+      return {
+        job,
+        analysisRun: run,
+        request: {
+          jobId: job.id,
+          type: job.type,
+          payload: {
+            analysisRunId: run.id,
+            projectId: run.projectId,
+            sourceSnapshotId: run.sourceSnapshotId,
+            targetSnapshotId: run.targetSnapshotId,
+            spatialRoomId: run.spatialRoomId,
+            registration: {
+              id: run.registration.id,
+              status: run.registration.status,
+              confidence: run.registration.confidence,
+              overlap: run.registration.overlap,
+              method: run.registration.method,
+              version: run.registration.version
+            },
+            regions: run.inputRegions,
+            engineVersion: run.engineVersion,
+            modelVersion: run.modelVersion,
+            policyVersion: run.policyVersion,
+            policy: (job.input as Record<string, unknown> | null)?.policy ?? {}
+          }
+        }
+      };
+    }
     case 'EXPORT_MODEL':
     case 'EXPORT_PLAN':
     case 'EXPORT_SCHEDULE': {
@@ -373,6 +410,12 @@ const worker = new Worker(
     try {
       const built = await buildPayload(jobId);
       const { job, request } = built;
+      if (job.type === 'PROGRESS_INTELLIGENCE' && 'analysisRun' in built) {
+        await prisma.progressAnalysisRun.update({
+          where: { id: built.analysisRun.id },
+          data: { status: 'RUNNING', startedAt: new Date(), error: null }
+        });
+      }
       const result = await callVisionService(request);
       const output = result.output ?? {};
 
@@ -603,6 +646,39 @@ const worker = new Worker(
           });
         }
 
+        if (job.type === 'PROGRESS_INTELLIGENCE' && 'analysisRun' in built) {
+          const run = built.analysisRun;
+          const observations = Array.isArray(output.observations) ? output.observations as Array<Record<string, unknown>> : [];
+          await tx.aiObservation.deleteMany({ where: { analysisRunId: run.id, status: 'PROPOSED' } });
+          for (const item of observations) {
+            await tx.aiObservation.create({
+              data: {
+                projectId: run.projectId,
+                analysisRunId: run.id,
+                sourceSnapshotId: run.sourceSnapshotId,
+                targetSnapshotId: run.targetSnapshotId,
+                spatialRoomId: run.spatialRoomId,
+                observationType: String(item.observationType ?? 'UNCERTAIN_CHANGE'),
+                spatialRef: asJson((item.spatialRef ?? {}) as Record<string, unknown>),
+                structuredEvidence: asJson((item.structuredEvidence ?? {}) as Record<string, unknown>),
+                confidence: Number(item.confidence ?? 0),
+                modelVersion: typeof item.modelVersion === 'string' ? item.modelVersion : run.modelVersion,
+                policyVersion: typeof item.policyVersion === 'string' ? item.policyVersion : run.policyVersion,
+                status: 'PROPOSED'
+              }
+            });
+          }
+          await tx.progressAnalysisRun.update({
+            where: { id: run.id },
+            data: {
+              status: 'SUCCEEDED',
+              diagnostics: asJson((output.diagnostics ?? {}) as Record<string, unknown>),
+              completedAt: new Date(),
+              error: null
+            }
+          });
+        }
+
         await tx.processingJob.update({
           where: { id: jobId },
           data: { status: 'SUCCEEDED', progress: 100, output: asJson(output), completedAt: new Date() }
@@ -616,6 +692,12 @@ const worker = new Worker(
         data: { status: 'FAILED', error: message, completedAt: new Date() }
       });
       const input = (failedJob.input ?? {}) as Record<string, unknown>;
+      if (failedJob.type === 'PROGRESS_INTELLIGENCE' && typeof input.analysisRunId === 'string') {
+        await prisma.progressAnalysisRun.updateMany({
+          where: { id: input.analysisRunId },
+          data: { status: 'FAILED', error: message, completedAt: new Date() }
+        });
+      }
       if (typeof input.exportRecordId === 'string') {
         await prisma.exportRecord.updateMany({
           where: { id: input.exportRecordId },

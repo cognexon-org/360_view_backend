@@ -92,6 +92,7 @@ enum JobType {
   EXPORT_PLAN
   EXPORT_SCHEDULE
   ROOM_SHELL
+  PROGRESS_INTELLIGENCE
 }
 
 enum JobStatus {
@@ -375,6 +376,7 @@ model ProcessingJob {
   createdAt   DateTime       @default(now())
   startedAt   DateTime?
   completedAt DateTime?
+  analysisRun ProgressAnalysisRun?
 
   @@index([captureId])
   @@index([status])
@@ -752,6 +754,7 @@ model ProgressProject {
   reports         ProjectReport[]
   designRealityAlignments DesignRealityAlignment[]
   designRealityEvaluations DesignRealityEvaluation[]
+  analysisRuns    ProgressAnalysisRun[]
 
   @@index([unitId])
   @@index([createdById])
@@ -791,6 +794,7 @@ model SpatialRoom {
   issues            ProjectIssue[]
   observations      AiObservation[]
   designRealityAlignments DesignRealityAlignment[]
+  analysisRuns      ProgressAnalysisRun[]
 
   @@index([projectId])
   @@index([floorId])
@@ -826,6 +830,8 @@ model CaptureSnapshot {
   sourceObservations    AiObservation[] @relation("ObservationSource")
   targetObservations    AiObservation[] @relation("ObservationTarget")
   designRealityAlignments DesignRealityAlignment[]
+  sourceAnalysisRuns ProgressAnalysisRun[] @relation("ProgressAnalysisSource")
+  targetAnalysisRuns ProgressAnalysisRun[] @relation("ProgressAnalysisTarget")
 
   @@index([projectId, capturedAt])
   @@index([designReferenceProjectId])
@@ -849,6 +855,7 @@ model CaptureRegistration {
   verifiedById     String?
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
+  analysisRuns     ProgressAnalysisRun[]
 
   @@unique([sourceSnapshotId, targetSnapshotId, version])
   @@index([projectId])
@@ -896,6 +903,39 @@ model DesignRealityEvaluation {
 
   @@index([projectId, createdAt])
   @@index([alignmentId, createdAt])
+}
+
+model ProgressAnalysisRun {
+  id               String              @id @default(cuid())
+  projectId        String
+  project          ProgressProject     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceSnapshotId String
+  sourceSnapshot   CaptureSnapshot     @relation("ProgressAnalysisSource", fields: [sourceSnapshotId], references: [id], onDelete: Cascade)
+  targetSnapshotId String
+  targetSnapshot   CaptureSnapshot     @relation("ProgressAnalysisTarget", fields: [targetSnapshotId], references: [id], onDelete: Cascade)
+  registrationId   String
+  registration     CaptureRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  spatialRoomId    String?
+  spatialRoom      SpatialRoom?        @relation(fields: [spatialRoomId], references: [id], onDelete: SetNull)
+  status           String              @default("QUEUED")
+  engineVersion    String
+  modelVersion     String?
+  policyVersion    String
+  inputRegions     Json
+  diagnostics      Json?
+  jobId            String?             @unique
+  job              ProcessingJob?      @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  createdById      String
+  createdAt        DateTime            @default(now())
+  startedAt        DateTime?
+  completedAt      DateTime?
+  error            String?
+  observations     AiObservation[]
+
+  @@index([projectId, createdAt])
+  @@index([sourceSnapshotId, targetSnapshotId])
+  @@index([registrationId])
+  @@index([spatialRoomId])
 }
 
 model ProjectIssue {
@@ -977,6 +1017,8 @@ model AiObservation {
   confidence       Float
   modelVersion     String?
   policyVersion    String?
+  analysisRunId    String?
+  analysisRun      ProgressAnalysisRun? @relation(fields: [analysisRunId], references: [id], onDelete: SetNull)
   status           String           @default("PROPOSED")
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
@@ -984,6 +1026,7 @@ model AiObservation {
 
   @@index([projectId, status])
   @@index([spatialRoomId])
+  @@index([analysisRunId])
 }
 
 model ObservationDecision {

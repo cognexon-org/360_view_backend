@@ -11,6 +11,7 @@ import { callRegistrationService } from '../lib/vision-client.js';
 import { buildEvidenceInventoryDiff } from '../lib/progress-comparison.js';
 import { buildDesignRealityDeviationReport, parsePolygon } from '../lib/design-reality-deviation.js';
 import { buildProgressReport } from '../lib/progress-report.js';
+import { visionQueue } from '../lib/queue.js';
 
 const captureMode = z.enum(['PROPERTY_TOUR', 'DESIGN_SCAN']);
 const capturePlatform = z.enum(['ANDROID', 'IOS', 'WEB']);
@@ -69,6 +70,10 @@ function projectInclude() {
       orderBy: { createdAt: 'desc' as const }, take: 100,
       include: { decisions: { orderBy: { createdAt: 'desc' as const }, take: 20 } }
     },
+    analysisRuns: {
+      orderBy: { createdAt: 'desc' as const }, take: 25,
+      include: { observations: { orderBy: { createdAt: 'asc' as const }, include: { decisions: { orderBy: { createdAt: 'desc' as const }, take: 20 } } } }
+    },
     reports: { orderBy: { createdAt: 'desc' as const }, take: 25 }
   };
 }
@@ -81,7 +86,7 @@ export async function progressRoutes(app: FastifyInstance) {
         unit: { include: { property: true } },
         floors: { orderBy: [{ level: 'asc' }, { createdAt: 'asc' }] },
         rooms: { orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] },
-        _count: { select: { snapshots: true, issues: true, observations: true } }
+        _count: { select: { snapshots: true, issues: true, observations: true, analysisRuns: true } }
       },
       orderBy: { updatedAt: 'desc' }
     });
@@ -637,6 +642,122 @@ export async function progressRoutes(app: FastifyInstance) {
     } catch (error) {
       return badRequest(reply, error);
     }
+  });
+
+  app.get('/v2/progress-projects/:projectId/analysis-runs', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { projectId } = request.params as { projectId: string };
+      const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+      if (!project) return notFound(reply, 'Progress project');
+      const query = z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }).parse(request.query);
+      return prisma.progressAnalysisRun.findMany({
+        where: { projectId },
+        orderBy: { createdAt: 'desc' },
+        take: query.limit,
+        include: { observations: { orderBy: { createdAt: 'asc' }, include: { decisions: { orderBy: { createdAt: 'desc' } } } } }
+      });
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.get('/v2/progress-analysis-runs/:runId', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const run = await prisma.progressAnalysisRun.findFirst({
+      where: { id: runId, project: { unit: { property: { organizationId: request.user.organizationId } } } },
+      include: { observations: { orderBy: { createdAt: 'asc' }, include: { decisions: { orderBy: { createdAt: 'desc' } } } } }
+    });
+    if (!run) return notFound(reply, 'Progress analysis run');
+    return run;
+  });
+
+  app.post('/v2/progress-projects/:projectId/analysis-runs', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { projectId } = request.params as { projectId: string };
+      const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+      if (!project) return notFound(reply, 'Progress project');
+
+      const regionSchema = z.object({
+        id: z.string().min(1).max(120),
+        changeType: z.enum(['ADDED', 'REMOVED', 'MOVED', 'SURFACE_CHANGED', 'APPEARANCE_CHANGED', 'GEOMETRY_CHANGED', 'UNCERTAIN']),
+        semanticHint: z.enum(['WALL', 'PARTITION_WALL', 'FLOORING', 'CEILING', 'DOOR', 'WINDOW', 'ELECTRICAL', 'PLUMBING', 'FIXTURE', 'FURNITURE', 'SURFACE', 'OPENING', 'UNKNOWN']).default('UNKNOWN'),
+        spatialRef: z.record(z.unknown()).optional(),
+        magnitude: z.record(z.unknown()).optional(),
+        geometricConfidence: z.number().min(0).max(1).default(0.7),
+        semanticConfidence: z.number().min(0).max(1).optional(),
+        evidenceRefs: z.array(z.string().max(300)).max(20).default([])
+      });
+      const body = z.object({
+        sourceSnapshotId: z.string(), targetSnapshotId: z.string(), registrationId: z.string().optional(), spatialRoomId: z.string().optional(),
+        regions: z.array(regionSchema).min(1).max(200),
+        policy: z.object({ minConfidence: z.number().min(0).max(1).default(0.55), includeUncertainRegions: z.boolean().default(false) }).default({ minConfidence: 0.55, includeUncertainRegions: false }),
+        engineVersion: z.string().min(1).max(80).default('progress-intelligence-v1'),
+        modelVersion: z.string().min(1).max(120).default('bounded-taxonomy-v1'),
+        policyVersion: z.string().min(1).max(120).default('progress-policy-v1')
+      }).refine((value) => value.sourceSnapshotId !== value.targetSnapshotId, 'Snapshots must differ').parse(request.body);
+
+      const snapshots = await prisma.captureSnapshot.findMany({
+        where: { id: { in: [body.sourceSnapshotId, body.targetSnapshotId] }, projectId },
+        include: { capture: { include: { rooms: true } } }
+      });
+      if (snapshots.length !== 2) return reply.code(400).send({ error: 'SNAPSHOT_NOT_IN_PROJECT' });
+      if (body.spatialRoomId) {
+        const room = await prisma.spatialRoom.findFirst({ where: { id: body.spatialRoomId, projectId } });
+        if (!room) return reply.code(400).send({ error: 'SPATIAL_ROOM_NOT_IN_PROJECT' });
+        if (snapshots.some((snapshot) => !snapshot.capture.rooms.some((captureRoom) => captureRoom.spatialRoomId === body.spatialRoomId))) {
+          return reply.code(409).send({ error: 'ROOM_NOT_PRESENT_IN_BOTH_SNAPSHOTS' });
+        }
+      }
+
+      const registration = body.registrationId
+        ? await prisma.captureRegistration.findFirst({ where: { id: body.registrationId, projectId } })
+        : await prisma.captureRegistration.findFirst({
+            where: {
+              projectId, status: 'VERIFIED',
+              OR: [
+                { sourceSnapshotId: body.sourceSnapshotId, targetSnapshotId: body.targetSnapshotId },
+                { sourceSnapshotId: body.targetSnapshotId, targetSnapshotId: body.sourceSnapshotId }
+              ]
+            },
+            orderBy: { updatedAt: 'desc' }
+          });
+      if (!registration) return reply.code(409).send({ error: 'VERIFIED_REGISTRATION_REQUIRED' });
+      if (registration.status !== 'VERIFIED') return reply.code(409).send({ error: 'REGISTRATION_MUST_BE_VERIFIED' });
+      const pairMatches = (
+        (registration.sourceSnapshotId === body.sourceSnapshotId && registration.targetSnapshotId === body.targetSnapshotId) ||
+        (registration.sourceSnapshotId === body.targetSnapshotId && registration.targetSnapshotId === body.sourceSnapshotId)
+      );
+      if (!pairMatches) return reply.code(409).send({ error: 'REGISTRATION_DOES_NOT_MATCH_CAPTURE_PAIR' });
+
+      const created = await prisma.$transaction(async (tx) => {
+        const run = await tx.progressAnalysisRun.create({
+          data: {
+            projectId, sourceSnapshotId: body.sourceSnapshotId, targetSnapshotId: body.targetSnapshotId,
+            registrationId: registration.id, spatialRoomId: body.spatialRoomId, status: 'QUEUED',
+            engineVersion: body.engineVersion, modelVersion: body.modelVersion, policyVersion: body.policyVersion,
+            inputRegions: asJson(body.regions), createdById: request.user.userId
+          }
+        });
+        const job = await tx.processingJob.create({
+          data: { type: 'PROGRESS_INTELLIGENCE', status: 'QUEUED', progress: 0, input: asJson({ analysisRunId: run.id, policy: body.policy }) }
+        });
+        const linked = await tx.progressAnalysisRun.update({ where: { id: run.id }, data: { jobId: job.id } });
+        await tx.progressProject.update({ where: { id: projectId }, data: { updatedAt: new Date() } });
+        return { run: linked, job };
+      });
+
+      try {
+        await visionQueue.add('PROGRESS_INTELLIGENCE', { jobId: created.job.id }, { attempts: 2, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: 200, removeOnFail: 500 });
+      } catch (queueError) {
+        const message = queueError instanceof Error ? queueError.message : String(queueError);
+        await prisma.$transaction([
+          prisma.processingJob.update({ where: { id: created.job.id }, data: { status: 'FAILED', error: message, completedAt: new Date() } }),
+          prisma.progressAnalysisRun.update({ where: { id: created.run.id }, data: { status: 'FAILED', error: message, completedAt: new Date() } })
+        ]);
+        throw queueError;
+      }
+
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'ProgressAnalysisRun', entityId: created.run.id, action: 'QUEUE', payload: { sourceSnapshotId: body.sourceSnapshotId, targetSnapshotId: body.targetSnapshotId, registrationId: registration.id, regionCount: body.regions.length } });
+      return reply.code(202).send({ ...created.run, observations: [], processingJobId: created.job.id });
+    } catch (error) { return badRequest(reply, error); }
   });
 
   app.post('/v2/progress-projects/:projectId/observations', { preHandler: [app.authenticate] }, async (request, reply) => {
