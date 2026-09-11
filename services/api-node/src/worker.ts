@@ -84,7 +84,7 @@ async function buildPayload(jobId: string) {
       if (!input.roomId || !Array.isArray(input.assetIds) || input.assetIds.length < 3) {
         throw new Error('PANORAMA_STITCH has invalid input');
       }
-      const assetsById = new Map(job.capture.assets.map((asset) => [asset.id, asset]));
+      const assetsById = new Map<string, any>(job.capture.assets.map((asset: any) => [asset.id, asset]));
       const frameByAssetId = new Map((input.frames ?? []).map((frame) => [frame.assetId, frame]));
       const inputAssets = input.assetIds.map((assetId) => {
         const asset = assetsById.get(assetId);
@@ -143,10 +143,10 @@ async function buildPayload(jobId: string) {
     }
     case 'CAPTURE_VALIDATION': {
       if (!job.capture) throw new Error('CAPTURE_VALIDATION requires a capture');
-      const assetsById = new Map(job.capture.assets.map((asset) => [asset.id, asset]));
+      const assetsById = new Map<string, any>(job.capture.assets.map((asset: any) => [asset.id, asset]));
       const basePayload = {
         mode: job.capture.mode,
-        rooms: job.capture.rooms.map((room) => {
+        rooms: job.capture.rooms.map((room: any) => {
           const panorama = room.panoramaAssetId ? assetsById.get(room.panoramaAssetId) : undefined;
           return {
             id: room.id,
@@ -158,16 +158,16 @@ async function buildPayload(jobId: string) {
             measurements: room.measurements
           };
         }),
-        connections: job.capture.connections.map((connection) => ({
+        connections: job.capture.connections.map((connection: any) => ({
           fromRoomId: connection.fromRoomId,
           toRoomId: connection.toRoomId
         })),
-        assetKinds: job.capture.assets.map((asset) => asset.kind)
+        assetKinds: job.capture.assets.map((asset: any) => asset.kind)
       };
       const payload = job.capture.mode === 'DESIGN_SCAN'
         ? {
             ...basePayload,
-            assets: job.capture.assets.map((asset) => ({
+            assets: job.capture.assets.map((asset: any) => ({
               id: asset.id,
               roomId: asset.roomId,
               kind: asset.kind,
@@ -191,8 +191,8 @@ async function buildPayload(jobId: string) {
           jobId: job.id,
           type: job.type,
           payload: {
-            rooms: job.capture.rooms.map((room) => ({ id: room.id, name: room.name })),
-            assets: job.capture.assets.map((asset) => ({
+            rooms: job.capture.rooms.map((room: any) => ({ id: room.id, name: room.name })),
+            assets: job.capture.assets.map((asset: any) => ({
               id: asset.id,
               roomId: asset.roomId,
               kind: asset.kind,
@@ -225,7 +225,7 @@ async function buildPayload(jobId: string) {
           payload: {
             projectId: job.designProject.id,
             currentModel: job.designProject.model,
-            rooms: job.capture.rooms.map((room) => ({
+            rooms: job.capture.rooms.map((room: any) => ({
               id: room.id,
               name: room.name,
               ceilingHeightM: room.ceilingHeightM,
@@ -234,7 +234,7 @@ async function buildPayload(jobId: string) {
               roomModel: room.roomModel
             })),
             connections: job.capture.connections,
-            assets: job.capture.assets.map((asset) => ({
+            assets: job.capture.assets.map((asset: any) => ({
               id: asset.id,
               roomId: asset.roomId,
               kind: asset.kind,
@@ -410,7 +410,7 @@ const worker = new Worker(
     try {
       const built = await buildPayload(jobId);
       const { job, request } = built;
-      if (job.type === 'PROGRESS_INTELLIGENCE' && 'analysisRun' in built) {
+      if (job.type === 'PROGRESS_INTELLIGENCE' && 'analysisRun' in built && built.analysisRun) {
         await prisma.progressAnalysisRun.update({
           where: { id: built.analysisRun.id },
           data: { status: 'RUNNING', startedAt: new Date(), error: null }
@@ -419,7 +419,7 @@ const worker = new Worker(
       const result = await callVisionService(request);
       const output = result.output ?? {};
 
-      await prisma.$transaction(async (tx) => {
+      await prisma.$transaction(async (tx: any) => {
         // Mode A completion logic is intentionally preserved from the supplied backend.
         if (job.type === 'PANORAMA_STITCH' && job.captureId) {
           const input = (job.input ?? {}) as { roomId?: string };
@@ -646,7 +646,7 @@ const worker = new Worker(
           });
         }
 
-        if (job.type === 'PROGRESS_INTELLIGENCE' && 'analysisRun' in built) {
+        if (job.type === 'PROGRESS_INTELLIGENCE' && 'analysisRun' in built && built.analysisRun) {
           const run = built.analysisRun;
           const observations = Array.isArray(output.observations) ? output.observations as Array<Record<string, unknown>> : [];
           await tx.aiObservation.deleteMany({ where: { analysisRunId: run.id, status: 'PROPOSED' } });

@@ -109,7 +109,7 @@ function matrix4(value: unknown): number[][] {
   if (!Array.isArray(value) || value.length !== 4 || value.some((row) => !Array.isArray(row) || row.length !== 4)) {
     throw new Error('Alignment transform must contain a 4x4 matrix');
   }
-  return value.map((row) => row.map((cell) => Number(cell)));
+  return (value as unknown[][]).map((row) => row.map((cell) => Number(cell)));
 }
 
 /**
