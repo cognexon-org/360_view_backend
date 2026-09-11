@@ -8,6 +8,7 @@ import { makeSlug } from '../lib/slug.js';
 import { visionQueue } from '../lib/queue.js';
 import { minioSigner } from '../lib/minio.js';
 import { config } from '../config.js';
+import { signedMaterial, signedVisualAsset } from '../lib/visual-registry.js';
 
 const point = z.tuple([z.number(), z.number()]);
 const measurementSchema = z.object({
@@ -349,6 +350,33 @@ export async function modeBRoutes(app: FastifyInstance) {
   app.get('/v2/catalogue/assets', { preHandler: [app.authenticate] }, async (request) => {
     const query = request.query as { category?: string; q?: string };
     return prisma.catalogueAsset.findMany({ where: { active: true, OR: [{ organizationId: request.user.organizationId }, { organizationId: null }], category: query.category, name: query.q ? { contains: query.q, mode: 'insensitive' } : undefined }, orderBy: { name: 'asc' }, take: 200 });
+  });
+
+  app.get('/v2/visual-registry', { preHandler: [app.authenticate] }, async (request) => {
+    const query = request.query as { category?: string };
+    const where = {
+      active: true,
+      OR: [{ organizationId: request.user.organizationId }, { organizationId: null }],
+      ...(query.category ? { category: query.category } : {}),
+    };
+    const [assets, materials] = await Promise.all([
+      prisma.catalogueAsset.findMany({ where, orderBy: { name: 'asc' }, take: 300 }),
+      prisma.material.findMany({
+        where: { active: true, OR: [{ organizationId: request.user.organizationId }, { organizationId: null }] },
+        orderBy: { name: 'asc' },
+        take: 300,
+      }),
+    ]);
+    const expiresInSeconds = 15 * 60;
+    const presign = (objectKey: string, expires: number) =>
+      minioSigner.presignedGetObject(config.MINIO_BUCKET_PRIVATE, objectKey, expires);
+    return {
+      version: '1.0',
+      expiresInSeconds,
+      generatedAt: new Date().toISOString(),
+      assets: await Promise.all(assets.map((asset) => signedVisualAsset(asset, presign, expiresInSeconds))),
+      materials: await Promise.all(materials.map((material) => signedMaterial(material, presign, expiresInSeconds))),
+    };
   });
 
   app.post('/v2/catalogue/assets', { preHandler: [app.authenticate] }, async (request, reply) => {
