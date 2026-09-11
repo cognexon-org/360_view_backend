@@ -10,12 +10,17 @@ import { config } from '../config.js';
 import { callRegistrationService } from '../lib/vision-client.js';
 import { buildEvidenceInventoryDiff } from '../lib/progress-comparison.js';
 import { buildDesignRealityDeviationReport, parsePolygon } from '../lib/design-reality-deviation.js';
+import { buildProgressReport } from '../lib/progress-report.js';
 
 const captureMode = z.enum(['PROPERTY_TOUR', 'DESIGN_SCAN']);
 const capturePlatform = z.enum(['ANDROID', 'IOS', 'WEB']);
 
 function jsonObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function compactJson(value: Record<string, unknown>) {
+  return asJson(JSON.parse(JSON.stringify(value)));
 }
 
 function projectInclude() {
@@ -56,8 +61,15 @@ function projectInclude() {
       orderBy: { updatedAt: 'desc' as const }, take: 50,
       include: { evaluations: { orderBy: { createdAt: 'desc' as const }, take: 3 } }
     },
-    issues: { orderBy: { updatedAt: 'desc' as const }, take: 100 },
-    observations: { orderBy: { createdAt: 'desc' as const }, take: 100 }
+    issues: {
+      orderBy: { updatedAt: 'desc' as const }, take: 100,
+      include: { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } }
+    },
+    observations: {
+      orderBy: { createdAt: 'desc' as const }, take: 100,
+      include: { decisions: { orderBy: { createdAt: 'desc' as const }, take: 20 } }
+    },
+    reports: { orderBy: { createdAt: 'desc' as const }, take: 25 }
   };
 }
 
@@ -592,7 +604,7 @@ export async function progressRoutes(app: FastifyInstance) {
       const body = z.object({
         spatialRoomId: z.string().optional(), captureSnapshotId: z.string().optional(), spatialRef: z.record(z.unknown()).optional(),
         title: z.string().min(1).max(180), description: z.string().max(4000).optional(), severity: z.enum(['INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']).default('INFO'),
-        assigneeId: z.string().optional(), evidenceRefs: z.array(z.string()).optional()
+        assigneeId: z.string().optional(), dueAt: z.string().datetime().optional(), evidenceRefs: z.array(z.string()).max(50).optional()
       }).parse(request.body);
       if (body.spatialRoomId) {
         const room = await prisma.spatialRoom.findFirst({ where: { id: body.spatialRoomId, projectId } });
@@ -602,15 +614,25 @@ export async function progressRoutes(app: FastifyInstance) {
         const snapshot = await prisma.captureSnapshot.findFirst({ where: { id: body.captureSnapshotId, projectId } });
         if (!snapshot) return notFound(reply, 'Capture snapshot');
       }
-      const issue = await prisma.projectIssue.create({
-        data: {
-          projectId, spatialRoomId: body.spatialRoomId, captureSnapshotId: body.captureSnapshotId,
-          spatialRef: body.spatialRef ? asJson(body.spatialRef) : undefined,
-          title: body.title, description: body.description, severity: body.severity, assigneeId: body.assigneeId,
-          evidenceRefs: body.evidenceRefs ? asJson(body.evidenceRefs) : undefined, createdById: request.user.userId
-        }
+      if (body.assigneeId) {
+        const assignee = await prisma.user.findFirst({ where: { id: body.assigneeId, organizationId: request.user.organizationId } });
+        if (!assignee) return reply.code(400).send({ error: 'ASSIGNEE_NOT_IN_ORGANIZATION' });
+      }
+      const issue = await prisma.$transaction(async (tx) => {
+        const created = await tx.projectIssue.create({
+          data: {
+            projectId, spatialRoomId: body.spatialRoomId, captureSnapshotId: body.captureSnapshotId,
+            spatialRef: body.spatialRef ? asJson(body.spatialRef) : undefined,
+            title: body.title, description: body.description, severity: body.severity, assigneeId: body.assigneeId,
+            dueAt: body.dueAt ? new Date(body.dueAt) : undefined,
+            evidenceRefs: body.evidenceRefs ? asJson(body.evidenceRefs) : undefined, createdById: request.user.userId
+          }
+        });
+        await tx.issueEvent.create({ data: { issueId: created.id, actorId: request.user.userId, eventType: 'CREATED', toStatus: created.status, payload: compactJson({ severity: created.severity, assigneeId: created.assigneeId }) } });
+        await tx.progressProject.update({ where: { id: projectId }, data: { updatedAt: new Date() } });
+        return tx.projectIssue.findUniqueOrThrow({ where: { id: created.id }, include: { events: { orderBy: { createdAt: 'desc' } } } });
       });
-      await prisma.progressProject.update({ where: { id: projectId }, data: { updatedAt: new Date() } });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'ProjectIssue', entityId: issue.id, action: 'CREATE', payload: { projectId, severity: issue.severity } });
       return reply.code(201).send(issue);
     } catch (error) {
       return badRequest(reply, error);
@@ -667,9 +689,162 @@ export async function progressRoutes(app: FastifyInstance) {
         await tx.aiObservation.update({ where: { id: observationId }, data: { status: body.decision } });
         return decision;
       });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'AiObservation', entityId: observationId, action: 'DECIDE', payload: { decision: body.decision } });
       return reply.code(201).send(result);
     } catch (error) {
       return badRequest(reply, error);
     }
   });
+
+  app.get('/v2/progress-projects/:projectId/team', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { projectId } = request.params as { projectId: string };
+    const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+    if (!project) return notFound(reply, 'Progress project');
+    return prisma.user.findMany({
+      where: { organizationId: request.user.organizationId },
+      select: { id: true, name: true, phone: true, role: true },
+      orderBy: [{ name: 'asc' }, { createdAt: 'asc' }]
+    });
+  });
+
+  app.get('/v2/progress-projects/:projectId/issues', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { projectId } = request.params as { projectId: string };
+      const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+      if (!project) return notFound(reply, 'Progress project');
+      const query = z.object({
+        status: z.string().max(40).optional(), severity: z.string().max(40).optional(), spatialRoomId: z.string().optional(), assigneeId: z.string().optional()
+      }).parse(request.query);
+      return prisma.projectIssue.findMany({
+        where: {
+          projectId,
+          ...(query.status ? { status: query.status } : {}),
+          ...(query.severity ? { severity: query.severity } : {}),
+          ...(query.spatialRoomId ? { spatialRoomId: query.spatialRoomId } : {}),
+          ...(query.assigneeId ? { assigneeId: query.assigneeId } : {})
+        },
+        include: { events: { orderBy: { createdAt: 'desc' }, take: 100 } },
+        orderBy: [{ updatedAt: 'desc' }]
+      });
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.patch('/v2/progress-issues/:issueId', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { issueId } = request.params as { issueId: string };
+      const issue = await prisma.projectIssue.findFirst({ where: { id: issueId, project: { unit: { property: { organizationId: request.user.organizationId } } } } });
+      if (!issue) return notFound(reply, 'Project issue');
+      const body = z.object({
+        title: z.string().min(1).max(180).optional(), description: z.string().max(4000).nullable().optional(),
+        severity: z.enum(['INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']).optional(),
+        status: z.enum(['OPEN', 'IN_REVIEW', 'RESOLVED', 'REJECTED']).optional(),
+        assigneeId: z.string().nullable().optional(), dueAt: z.string().datetime().nullable().optional(), note: z.string().max(2000).optional()
+      }).parse(request.body);
+      if (body.assigneeId) {
+        const assignee = await prisma.user.findFirst({ where: { id: body.assigneeId, organizationId: request.user.organizationId } });
+        if (!assignee) return reply.code(400).send({ error: 'ASSIGNEE_NOT_IN_ORGANIZATION' });
+      }
+      const nextStatus = body.status ?? issue.status;
+      const updated = await prisma.$transaction(async (tx) => {
+        const next = await tx.projectIssue.update({
+          where: { id: issueId },
+          data: {
+            title: body.title, description: body.description, severity: body.severity,
+            status: body.status, assigneeId: body.assigneeId, dueAt: body.dueAt === undefined ? undefined : body.dueAt === null ? null : new Date(body.dueAt),
+            resolvedAt: body.status === 'RESOLVED' ? new Date() : body.status && issue.status === 'RESOLVED' ? null : undefined,
+            closedById: ['RESOLVED', 'REJECTED'].includes(nextStatus) ? request.user.userId : body.status ? null : undefined
+          }
+        });
+        const changed = body.status && body.status !== issue.status;
+        await tx.issueEvent.create({
+          data: {
+            issueId, actorId: request.user.userId, eventType: changed ? 'STATUS_CHANGED' : 'UPDATED',
+            fromStatus: changed ? issue.status : undefined, toStatus: changed ? body.status : undefined,
+            note: body.note,
+            payload: compactJson({ severity: body.severity, assigneeId: body.assigneeId, dueAt: body.dueAt })
+          }
+        });
+        return tx.projectIssue.findUniqueOrThrow({ where: { id: issueId }, include: { events: { orderBy: { createdAt: 'desc' } } } });
+      });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'ProjectIssue', entityId: issueId, action: 'UPDATE', payload: { status: updated.status, severity: updated.severity } });
+      return updated;
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.post('/v2/progress-issues/:issueId/events', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { issueId } = request.params as { issueId: string };
+      const issue = await prisma.projectIssue.findFirst({ where: { id: issueId, project: { unit: { property: { organizationId: request.user.organizationId } } } } });
+      if (!issue) return notFound(reply, 'Project issue');
+      const body = z.object({ eventType: z.enum(['COMMENT', 'RESOLUTION_NOTE', 'EVIDENCE_NOTE']), note: z.string().min(1).max(4000), payload: z.record(z.unknown()).optional() }).parse(request.body);
+      const event = await prisma.issueEvent.create({ data: { issueId, actorId: request.user.userId, eventType: body.eventType, note: body.note, payload: body.payload ? asJson(body.payload) : undefined } });
+      await prisma.progressProject.update({ where: { id: issue.projectId }, data: { updatedAt: new Date() } });
+      return reply.code(201).send(event);
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.post('/v2/progress-issues/:issueId/decision', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { issueId } = request.params as { issueId: string };
+      const issue = await prisma.projectIssue.findFirst({ where: { id: issueId, project: { unit: { property: { organizationId: request.user.organizationId } } } } });
+      if (!issue) return notFound(reply, 'Project issue');
+      const body = z.object({ decision: z.enum(['VERIFIED', 'REJECTED', 'CORRECTED']), note: z.string().max(2000).optional(), correctedValue: z.record(z.unknown()).optional() }).parse(request.body);
+      const updated = await prisma.$transaction(async (tx) => {
+        const next = await tx.projectIssue.update({ where: { id: issueId }, data: { verification: body.decision } });
+        await tx.issueEvent.create({ data: { issueId, actorId: request.user.userId, eventType: 'VERIFICATION_DECISION', note: body.note, payload: compactJson({ decision: body.decision, correctedValue: body.correctedValue }) } });
+        return tx.projectIssue.findUniqueOrThrow({ where: { id: issueId }, include: { events: { orderBy: { createdAt: 'desc' } } } });
+      });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'ProjectIssue', entityId: issueId, action: 'VERIFY', payload: { decision: body.decision } });
+      return updated;
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.get('/v2/progress-projects/:projectId/reports', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { projectId } = request.params as { projectId: string };
+    const project = await getProgressProjectForOrganization(projectId, request.user.organizationId);
+    if (!project) return notFound(reply, 'Progress project');
+    return prisma.projectReport.findMany({ where: { projectId }, orderBy: { createdAt: 'desc' }, take: 100 });
+  });
+
+  app.post('/v2/progress-projects/:projectId/reports', { preHandler: [app.authenticate] }, async (request, reply) => {
+    try {
+      const { projectId } = request.params as { projectId: string };
+      const project = await prisma.progressProject.findFirst({
+        where: { id: projectId, unit: { property: { organizationId: request.user.organizationId } } },
+        include: { unit: { include: { property: true } } }
+      });
+      if (!project) return notFound(reply, 'Progress project');
+      const body = z.object({
+        reportType: z.enum(['WEEKLY', 'MILESTONE', 'HANDOVER', 'CUSTOM']).default('MILESTONE'), label: z.string().max(160).optional(),
+        periodStart: z.string().datetime().optional(), periodEnd: z.string().datetime().optional()
+      }).parse(request.body);
+      const start = body.periodStart ? new Date(body.periodStart) : undefined;
+      const end = body.periodEnd ? new Date(body.periodEnd) : undefined;
+      if (start && end && start > end) return reply.code(400).send({ error: 'REPORT_PERIOD_INVALID' });
+      const dateWhere = start || end ? { ...(start ? { gte: start } : {}), ...(end ? { lte: end } : {}) } : undefined;
+      const [snapshots, issues, observations] = await Promise.all([
+        prisma.captureSnapshot.findMany({ where: { projectId, ...(dateWhere ? { capturedAt: dateWhere } : {}) }, orderBy: { capturedAt: 'asc' } }),
+        prisma.projectIssue.findMany({ where: { projectId, ...(dateWhere ? { updatedAt: dateWhere } : {}) }, orderBy: { updatedAt: 'asc' } }),
+        prisma.aiObservation.findMany({ where: { projectId, ...(dateWhere ? { createdAt: dateWhere } : {}) }, orderBy: { createdAt: 'asc' } })
+      ]);
+      const content = buildProgressReport({
+        project: { id: project.id, name: project.name, unitLabel: project.unit.label, propertyName: project.unit.property.name },
+        periodStart: start, periodEnd: end, label: body.label, snapshots, issues, observations
+      });
+      const report = await prisma.projectReport.create({ data: {
+        projectId, reportType: body.reportType, label: body.label, periodStart: start, periodEnd: end,
+        schemaVersion: content.schemaVersion, disclaimerVersion: content.disclaimerVersion, content: asJson(content), generatedById: request.user.userId
+      } });
+      await audit({ organizationId: request.user.organizationId, actorId: request.user.userId, entityType: 'ProjectReport', entityId: report.id, action: 'GENERATE', payload: { reportType: report.reportType, periodStart: report.periodStart, periodEnd: report.periodEnd } });
+      return reply.code(201).send({ ...report, content });
+    } catch (error) { return badRequest(reply, error); }
+  });
+
+  app.get('/v2/progress-reports/:reportId', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { reportId } = request.params as { reportId: string };
+    const report = await prisma.projectReport.findFirst({ where: { id: reportId, project: { unit: { property: { organizationId: request.user.organizationId } } } } });
+    if (!report) return notFound(reply, 'Progress report');
+    return report;
+  });
+
 }

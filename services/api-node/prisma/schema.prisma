@@ -749,6 +749,7 @@ model ProgressProject {
   registrations   CaptureRegistration[]
   issues          ProjectIssue[]
   observations    AiObservation[]
+  reports         ProjectReport[]
   designRealityAlignments DesignRealityAlignment[]
   designRealityEvaluations DesignRealityEvaluation[]
 
@@ -911,14 +912,53 @@ model ProjectIssue {
   status            String           @default("OPEN")
   severity          String           @default("INFO")
   assigneeId        String?
-  verification      String?
+  dueAt             DateTime?
+  resolvedAt        DateTime?
+  closedById        String?
+  verification      String           @default("UNVERIFIED")
   evidenceRefs      Json?
   createdById       String
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
+  events            IssueEvent[]
 
   @@index([projectId, status])
+  @@index([projectId, assigneeId])
   @@index([spatialRoomId])
+}
+
+model IssueEvent {
+  id          String       @id @default(cuid())
+  issueId     String
+  issue       ProjectIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  actorId     String
+  eventType   String
+  fromStatus  String?
+  toStatus    String?
+  note        String?
+  payload     Json?
+  createdAt   DateTime     @default(now())
+
+  @@index([issueId, createdAt])
+  @@index([actorId])
+}
+
+model ProjectReport {
+  id                String          @id @default(cuid())
+  projectId         String
+  project           ProgressProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  reportType        String          @default("MILESTONE")
+  label             String?
+  periodStart       DateTime?
+  periodEnd         DateTime?
+  schemaVersion     Int             @default(1)
+  disclaimerVersion String
+  content           Json
+  generatedById     String
+  createdAt         DateTime        @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([projectId, periodStart, periodEnd])
 }
 
 model AiObservation {
