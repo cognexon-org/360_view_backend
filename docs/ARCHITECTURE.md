@@ -28,7 +28,7 @@ Android app / iOS app / seller dashboard
        - capture graph validation
        - parametric room-shell GLB generation
 
-PostgreSQL stores product and workflow data.
+CockroachDB stores product, workflow, and spatial progression data.
 MinIO stores private source evidence and public, versioned delivery assets.
 ```
 

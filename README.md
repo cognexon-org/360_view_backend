@@ -14,7 +14,7 @@ This release was rebased on the user's latest working `360_view_backend-main (1)
 | API | Node.js 22, TypeScript, Fastify, Prisma | 3000 | Auth, properties, captures, Mode A tours, Mode B projects and public APIs |
 | Worker | Node.js, BullMQ | — | Long-running panorama, geometry, render and export orchestration |
 | Vision | Python, FastAPI, OpenCV, NumPy, Shapely, trimesh | 8001 | Mode A stitching/QA and Mode B evidence/geometry/export processing |
-| PostgreSQL | PostgreSQL 16 | 5432 | Organisation-scoped product and workflow data |
+| CockroachDB | CockroachDB v24.3 | 26257 / 8080 | Distributed SQL database for product, workflow, and spatial data |
 | Redis | Redis 7 | 6379 | BullMQ jobs, retries and progress |
 | Object storage | MinIO | 9000/9001 | Private originals/drafts and approved public derivatives |
 
@@ -24,7 +24,7 @@ Requirements:
 
 - Docker Desktop or Docker Engine with Compose
 - Approximately 6–8 GB free RAM
-- Ports 3000, 5432, 6379, 8001, 9000 and 9001 available
+- Ports 3000, 6379, 8001, 8080, 9000, 9001 and 26257 available
 
 ```bash
 cp .env.example .env
@@ -34,13 +34,43 @@ docker compose up --build
 Open:
 
 ```text
-API:           http://localhost:3000
-API docs:      http://localhost:3000/docs
-Vision docs:   http://localhost:8001/docs
-MinIO console: http://localhost:9001
+API:                 http://localhost:3000
+API docs:            http://localhost:3000/docs
+Vision docs:         http://localhost:8001/docs
+CockroachDB Console: http://localhost:8080
+MinIO console:       http://localhost:9001
 ```
 
 For a physical Android device, replace the presign/public `localhost` values in `.env` with the computer's LAN IP address.
+
+## Database Migration (PostgreSQL to CockroachDB)
+
+To export and migrate existing data from a legacy PostgreSQL database into CockroachDB:
+
+1. Ensure CockroachDB is running and its schema is applied:
+   ```bash
+   npm --prefix services/api-node run prisma:push
+   ```
+
+2. Run the automated data migration script:
+   ```bash
+   # From workspace root:
+   npm run db:migrate:pg-to-cockroach
+
+   # Or specify explicit database URLs:
+   npm --prefix services/api-node run db:migrate:pg-to-cockroach -- \
+     --source-url "postgresql://propertytour:password@localhost:5432/propertytour360?sslmode=disable" \
+     --target-url "postgresql://root@localhost:26257/propertytour360?sslmode=disable"
+   ```
+
+3. To only verify row counts between PostgreSQL and CockroachDB without migrating:
+   ```bash
+   npm run db:migrate:pg-to-cockroach -- --verify-only
+   ```
+
+4. For native SQL dumps via `pg_dump`:
+   - Linux/macOS: `./scripts/export-pg-dump.sh [dump_file.sql]`
+   - Windows PowerShell: `.\scripts\export-pg-dump.ps1`
 
 ## Mode A preservation
 

@@ -1,4 +1,46 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import dotenv from 'dotenv';
 import { z } from 'zod';
+
+// Automatically locate and load .env when running on host or inside container
+const envPaths = [
+  resolve(process.cwd(), '.env'),
+  resolve(process.cwd(), '../../.env'),
+  resolve(process.cwd(), '../.env')
+];
+for (const p of envPaths) {
+  if (existsSync(p)) {
+    dotenv.config({ path: p });
+  }
+}
+
+const env: Record<string, any> = { ...process.env };
+
+// Fallback MinIO keys from MINIO_ROOT_USER / MINIO_ROOT_PASSWORD in .env
+if (!env.MINIO_ACCESS_KEY && env.MINIO_ROOT_USER) {
+  env.MINIO_ACCESS_KEY = env.MINIO_ROOT_USER;
+}
+if (!env.MINIO_SECRET_KEY && env.MINIO_ROOT_PASSWORD) {
+  env.MINIO_SECRET_KEY = env.MINIO_ROOT_PASSWORD;
+}
+
+// When running on the host outside Docker, normalize Docker-internal container hostnames to localhost
+const isInsideDocker = existsSync('/.dockerenv');
+if (!isInsideDocker) {
+  if (env.DATABASE_URL && env.DATABASE_URL.includes('@cockroach:')) {
+    env.DATABASE_URL = env.DATABASE_URL.replace('@cockroach:', '@localhost:');
+  }
+  if (env.REDIS_URL && env.REDIS_URL.includes('redis://redis:')) {
+    env.REDIS_URL = env.REDIS_URL.replace('redis://redis:', 'redis://localhost:');
+  }
+  if (env.VISION_SERVICE_URL && env.VISION_SERVICE_URL.includes('http://vision:')) {
+    env.VISION_SERVICE_URL = env.VISION_SERVICE_URL.replace('http://vision:', 'http://localhost:');
+  }
+  if (env.MINIO_ENDPOINT === 'minio') {
+    env.MINIO_ENDPOINT = 'localhost';
+  }
+}
 
 const schema = z.object({
   DATABASE_URL: z.string().min(1),
@@ -26,4 +68,4 @@ const schema = z.object({
   LOG_LEVEL: z.string().default('info')
 });
 
-export const config = schema.parse(process.env);
+export const config = schema.parse(env);

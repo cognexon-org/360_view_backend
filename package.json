@@ -6,6 +6,7 @@
     "dev": "docker compose up --build",
     "down": "docker compose down",
     "logs": "docker compose logs -f api worker vision",
-    "reset": "docker compose down -v"
+    "reset": "docker compose down -v",
+    "db:migrate:pg-to-cockroach": "node services/api-node/node_modules/tsx/dist/cli.mjs services/api-node/scripts/migrate-pg-to-cockroach.ts"
   }
 }
