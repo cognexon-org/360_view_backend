@@ -9,6 +9,7 @@ import { visionQueue } from '../lib/queue.js';
 import { minioSigner } from '../lib/minio.js';
 import { config } from '../config.js';
 import { signedMaterial, signedVisualAsset } from '../lib/visual-registry.js';
+import { builtinCatalogueAssets, builtinProducts } from '../lib/builtin-catalogue.js';
 
 const point = z.tuple([z.number(), z.number()]);
 const measurementSchema = z.object({
@@ -349,7 +350,8 @@ export async function modeBRoutes(app: FastifyInstance) {
 
   app.get('/v2/catalogue/assets', { preHandler: [app.authenticate] }, async (request) => {
     const query = request.query as { category?: string; q?: string };
-    return prisma.catalogueAsset.findMany({ where: { active: true, OR: [{ organizationId: request.user.organizationId }, { organizationId: null }], category: query.category, name: query.q ? { contains: query.q, mode: 'insensitive' } : undefined }, orderBy: { name: 'asc' }, take: 200 });
+    const databaseAssets = await prisma.catalogueAsset.findMany({ where: { active: true, OR: [{ organizationId: request.user.organizationId }, { organizationId: null }], category: query.category, name: query.q ? { contains: query.q, mode: 'insensitive' } : undefined }, orderBy: { name: 'asc' }, take: 200 });
+    return [...builtinCatalogueAssets(query), ...databaseAssets];
   });
 
   app.get('/v2/visual-registry', { preHandler: [app.authenticate] }, async (request) => {
@@ -359,7 +361,7 @@ export async function modeBRoutes(app: FastifyInstance) {
       OR: [{ organizationId: request.user.organizationId }, { organizationId: null }],
       ...(query.category ? { category: query.category } : {}),
     };
-    const [assets, materials] = await Promise.all([
+    const [databaseAssets, materials] = await Promise.all([
       prisma.catalogueAsset.findMany({ where, orderBy: { name: 'asc' }, take: 300 }),
       prisma.material.findMany({
         where: { active: true, OR: [{ organizationId: request.user.organizationId }, { organizationId: null }] },
@@ -374,7 +376,7 @@ export async function modeBRoutes(app: FastifyInstance) {
       version: '1.0',
       expiresInSeconds,
       generatedAt: new Date().toISOString(),
-      assets: await Promise.all(assets.map((asset) => signedVisualAsset(asset, presign, expiresInSeconds))),
+      assets: await Promise.all([...builtinCatalogueAssets(query), ...databaseAssets].map((asset) => signedVisualAsset(asset, presign, expiresInSeconds))),
       materials: await Promise.all(materials.map((material) => signedMaterial(material, presign, expiresInSeconds))),
     };
   });
@@ -396,7 +398,8 @@ export async function modeBRoutes(app: FastifyInstance) {
 
   app.get('/v2/products', { preHandler: [app.authenticate] }, async (request) => {
     const query = request.query as { category?: string; q?: string };
-    return prisma.product.findMany({ where: { active: true, OR: [{ organizationId: request.user.organizationId }, { organizationId: null }], category: query.category, name: query.q ? { contains: query.q, mode: 'insensitive' } : undefined }, include: { variants: true }, orderBy: { name: 'asc' }, take: 200 });
+    const databaseProducts = await prisma.product.findMany({ where: { active: true, OR: [{ organizationId: request.user.organizationId }, { organizationId: null }], category: query.category, name: query.q ? { contains: query.q, mode: 'insensitive' } : undefined }, include: { variants: true }, orderBy: { name: 'asc' }, take: 200 });
+    return [...builtinProducts(query), ...databaseProducts];
   });
 
   app.post('/v2/products', { preHandler: [app.authenticate] }, async (request, reply) => {
